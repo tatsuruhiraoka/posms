@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  # ---------- PostgreSQL ----------
+  db:
+    image: postgres:16-alpine
+    container_name: posms-db
+    restart: always
+    env_file: .env
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports: ["5432:5432"]
+
+  # ---------- MLflow ----------
+  mlflow:
+    image: mlflow/mlflow:2.12
+    container_name: posms-mlflow
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri
+      - postgresql://posms:${POSTGRES_PASSWORD}@db:5432/posms
+      - --default-artifact-root
+      - /mlruns
+      - -h
+      - 0.0.0.0
+    depends_on: [db]
+    volumes: [mlruns:/mlruns]
+    ports: ["5000:5000"]
+
+  # ---------- Prefect OSS (UI + API) ----------
+  prefect:
+    image: prefecthq/prefect:2.18-python3.11
+    container_name: posms-prefect
+    command: ["prefect", "orion", "start", "--host", "0.0.0.0", "--port", "4200"]
+    volumes: [prefect_data:/root/.prefect]     # 実行履歴を永続化
+    ports: ["4200:4200"]
+
+  # ---------- アプリ本体 ----------
+  app:
+    build: .
+    container_name: posms-app
+    restart: on-failure
+    env_file: .env
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api   # ★ これだけで Prefect に接続
+    depends_on: [db, mlflow, prefect]
+    volumes: [.:/app]
+    working_dir: /app
+    # 実行コマンドは Dockerfile の CMD:
+    #    python posms/flows/monthly_flow.py
+
+volumes:
+  db_data:
+  mlruns:
+  prefect_data:

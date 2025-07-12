@@ -1,0 +1,71 @@
+# ───────────── Python ─────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+.eggs/
+*.egg-info/
+wheels/
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage*
+.cache
+nosetests.xml
+coverage.xml
+*,cover
+
+# Jupyter
+.ipynb_checkpoints
+
+# Environment variables
+.env
+.env.*
+
+# Virtual envs
+venv/
+ENV/
+env/
+.venv/
+
+# IDE / editor
+.vscode/
+.idea/
+.devcontainer/
+
+# OS / miscellaneous
+.DS_Store
+*.log
+*.tmp
+
+# ───────────── Project‑specific ─────────────
+# MLflow experiment data
+mlruns/
+
+# Prefect OSS local storage
+.prefect/
+
+# DVC cache (local)
+.dvc/cache/
+
+# Generated Excel / CSV / model files
+outputs/
+**/model.mps
+**/model.lp
+**/final_best.json
+
+# Docker local overrides
+docker-compose.override.yml
+
+# SQLite dev DBs (if any)
+*.sqlite3

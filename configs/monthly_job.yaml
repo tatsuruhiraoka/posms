@@ -1,0 +1,23 @@
+# ---------- Prefect 2 Deployment spec ----------
+
+deployments:
+- name: monthly-refresh                # Prefect UI に表示される Deployment 名
+  flow_name: monthly_refresh           # @flow 関数名（posms/flows/monthly_flow.py 内）
+  entrypoint: posms/flows/monthly_flow.py:monthly_refresh   # ← フルパス:関数
+
+  schedule:                            # ----- 実行スケジュール -----
+    cron:
+      cron: "0 0 1 * *"                # 每月 1 日 00:00 (UTC) → Asia/Tokyo 09:00
+      timezone: "Asia/Tokyo"
+    active: true
+
+  work_pool:                           # ----- 実行インフラ -----
+    name: default-worker-pool          # Docker 用に作成した Work Pool 名
+    work_queue_name: "default"         # Queue がデフォルトのとき省略可
+
+  parameters:                          # ----- Flow 引数 -----
+    output_type: "分担表"              # ShiftBuilder のデフォルト出力
+    predict_date: null                 # None = Flow 内で自動計算
+    excel_template: "excel_templates/shift_template.xlsx"
+
+  tags: ["prod"]                       # 任意：UI 検索用タグ

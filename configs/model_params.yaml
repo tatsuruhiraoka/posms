@@ -1,0 +1,12 @@
+# XGBoost ハイパーパラメータ
+n_estimators: 200
+learning_rate: 0.05
+max_depth: 6
+subsample: 0.8
+colsample_bytree: 0.8
+gamma: 0
+reg_alpha: 0
+reg_lambda: 1
+objective: reg:squarederror
+random_state: 42
+early_stopping_rounds: 10

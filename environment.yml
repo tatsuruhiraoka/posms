@@ -1,0 +1,35 @@
+name: posms                           
+channels:
+  - conda-forge                       
+
+dependencies:
+  # ---------- Python ----------
+  - python=3.11                       
+  - pip                               
+
+  # ---------- Data / ML ----------
+  - pandas>=2.2                       
+  - numpy>=1.26                      
+  - scipy
+  - scikit-learn>=1.4
+  - xgboost
+  - sqlalchemy
+  - psycopg2                          
+  - openpyxl
+  - xlwings
+  - pulp                              
+  - mlflow                            
+
+  # ---------- Workflow / MLOps ----------
+  - prefect>=2.18                     
+  - dvc                               
+  - pyyaml                            
+
+  # ---------- Jupyter (任意) ----------
+  - jupyterlab
+
+  # ---------- pip-only ----------
+  - pip:
+      - poetry                        # ランタイムには不要だが開発用
+      - typer                         
+      - python-dotenv                 
