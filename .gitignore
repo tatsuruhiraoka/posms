@@ -31,6 +31,7 @@ coverage.xml
 # Environment variables
 .env
 .env.*
+!.env.example
 
 # Virtual envs
 venv/
@@ -69,3 +70,13 @@ docker-compose.override.yml
 
 # SQLite dev DBs (if any)
 *.sqlite3
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# OS ごみ
+Thumbs.db
+ehthumbs.db
+._*

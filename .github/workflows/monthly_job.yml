@@ -1,0 +1,36 @@
+name: Monthly POSMS Run
+
+# 毎月 1 日 00:00 (UTC) ≒ 日本時間 09:00
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python & Mamba
+      uses: mamba-org/setup-micromamba@v1
+      with:
+        environment-file: environment.yml
+        init-shell: bash
+
+    - name: Install project
+      shell: bash -l {0}
+      run: |
+        micromamba install -y poetry
+        poetry install --no-interaction
+
+    - name: Execute monthly flow
+      shell: bash -l {0}
+      env:
+        POSTGRES_USER: posms
+        POSTGRES_PASSWORD: posms
+        POSTGRES_DB: posms
+      run: |
+        # SQLite in-memory に書き換えるなど DB を用意する方法も可
+        python posms/flows/monthly_flow.py --predict_date $(date +"%Y-%m-%d")
