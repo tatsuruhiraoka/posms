@@ -3,6 +3,7 @@ scripts/run_monthly.py
 既存業務向けワンショットランチャー:
 Prefect Flow ``monthly_refresh`` をローカル関数呼びで実行する。
 """
+
 from __future__ import annotations
 
 import logging

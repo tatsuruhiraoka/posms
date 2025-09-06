@@ -1,35 +1,40 @@
-name: posms                           
+name: posms
 channels:
-  - conda-forge                       
+  - conda-forge
 
 dependencies:
   # ---------- Python ----------
-  - python=3.11                       
-  - pip                               
+  - python=3.11
+  - pip
 
   # ---------- Data / ML ----------
-  - pandas>=2.2                       
-  - numpy>=1.26                      
+  - pandas>=2.2
+  - numpy>=1.26
   - scipy
   - scikit-learn>=1.4
   - xgboost
   - sqlalchemy
-  - psycopg2                          
+  - psycopg2
   - openpyxl
   - xlwings
-  - pulp                              
-  - mlflow                            
+  - pulp
+  - mlflow
+  # - libomp            # ← macOS で必要になったら有効化
 
   # ---------- Workflow / MLOps ----------
-  - prefect>=2.18                     
-  - dvc                               
-  - pyyaml                            
+  - prefect>=2.18
+  - dvc
+  - pyyaml
 
-  # ---------- Jupyter (任意) ----------
+  # ---------- Jupyter / Dev ----------
   - jupyterlab
+  - ipykernel          # ← あると便利
+  - ruff
+  - black
+  - pytest
+  - typer              # ← conda 側でOK
 
-  # ---------- pip-only ----------
+  # ---------- pip (開発のみ) ----------
   - pip:
-      - poetry                        # ランタイムには不要だが開発用
-      - typer                         
-      - python-dotenv                 
+      - poetry         # ランタイムには不要だが開発用
+      - jpholiday      # 日本の祝日フラグ用（FeatureBuilder が依存）

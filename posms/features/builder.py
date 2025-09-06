@@ -1,153 +1,348 @@
+# posms/features/builder.py
 """
 posms.features.builder
 ======================
 
-FeatureBuilder
---------------
+FeatureBuilder（MailVolume + jpholiday 対応）
 
-- DB から mail_data を読み込み
-- 日付系 / ラグ / 移動平均 などの特徴量を生成
-- X (pandas.DataFrame) と y (Series) を返す
-
-推論時は最新モデル (run_id 指定可) を MLflow からロードし、
-単一日の需要予測 `predict()` を提供する。
+- 単一 office_id の系列を DB から取得（DATABASE_URL か POSTGRES_* で接続）
+- 特徴量:
+    dow, dow_sin, dow_cos,
+    is_holiday, is_after_holiday, is_after_after_holiday,
+    month, season (1:春,2:夏,3:秋,4:冬),
+    lag_1, lag_7, rolling_mean_7,
+    is_new_year, is_obon,
+    price_increase_flag
+- 学習用 (X, y) と、単一日の予測 API を提供
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, List
 
-import mlflow
+import numpy as np
 import pandas as pd
-import yaml
-from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
-from xgboost import XGBRegressor
+from sqlalchemy import create_engine, text, inspect
+from sqlalchemy.engine import URL, Engine
 
-LOGGER = logging.getLogger("posms.features.builder")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+from posms.models import ModelPredictor
+
+LOGGER = logging.getLogger(__name__)
+
+FEATURE_COLUMNS: List[str] = [
+    "dow",
+    "dow_sin",
+    "dow_cos",
+    "is_holiday",
+    "is_after_holiday",
+    "is_after_after_holiday",
+    "month",
+    "season",
+    "lag_1",
+    "lag_7",
+    "rolling_mean_7",
+    "is_new_year",
+    "is_obon",
+    "price_increase_flag",
+]
 
 
 class FeatureBuilder:
-    """特徴量 DataFrame を構築するヘルパー"""
+    """
+    Parameters
+    ----------
+    office_id : int | None
+        対象局 ID。None の場合、データ内に 1 局しか無ければ自動選択。
+        複数局が存在するのに未指定なら例外。
+    base_dir : Path | None
+        （将来拡張用）プロジェクトルート推定に使用。
+    engine : sqlalchemy.engine.Engine | None
+        既存 Engine を渡す場合。None なら環境変数から自動生成。
+    """
 
-    def __init__(self, base_dir: Path | None = None) -> None:
-        base_dir = base_dir or Path(__file__).resolve().parents[2]
-        env_path = base_dir / ".env"
-        if env_path.exists():
-            load_dotenv(env_path)
-
-        db_url = (
-            f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}"
-            f"@{os.getenv('POSTGRES_HOST', 'localhost')}:{os.getenv('POSTGRES_PORT', '5432')}"
-            f"/{os.getenv('POSTGRES_DB')}"
-        )
-        self.engine = create_engine(db_url)
-
-    # ------------------------------------------------------------------
-    # 1. データロード
-    # ------------------------------------------------------------------
-    def _load_mail(self) -> pd.DataFrame:
-        query = "SELECT mail_date, mail_count, is_holiday, price_increase_flag FROM mail_data"
-        df = pd.read_sql(query, self.engine, parse_dates=["mail_date"])
-        df = df.sort_values("mail_date")
-        return df
-
-    # ------------------------------------------------------------------
-    # 2. 特徴量生成
-    # ------------------------------------------------------------------
-    def _add_date_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        df["weekday"] = df["mail_date"].dt.weekday
-        df["month"] = df["mail_date"].dt.month
-        df["day"] = df["mail_date"].dt.day
-        return df
-
-    def _add_lag_features(self, df: pd.DataFrame, lags: Tuple[int, ...] = (1, 7)) -> pd.DataFrame:
-        for lag in lags:
-            df[f"lag_{lag}"] = df["mail_count"].shift(lag)
-        return df
-
-    def _add_rolling_mean(self, df: pd.DataFrame, window: int = 7) -> pd.DataFrame:
-        df[f"roll_mean_{window}"] = df["mail_count"].shift(1).rolling(window).mean()
-        return df
-
-    # ------------------------------------------------------------------
-    # 3. 外部 API
-    # ------------------------------------------------------------------
-    def build(self) -> Tuple[pd.DataFrame, pd.Series]:
-        """
-        Returns
-        -------
-        X : pandas.DataFrame
-        y : pandas.Series
-        """
-        df = self._load_mail()
-        df = (
-            df.pipe(self._add_date_features)
-            .pipe(self._add_lag_features)
-            .pipe(self._add_rolling_mean)
-            .dropna()
+    def __init__(
+        self,
+        office_id: Optional[int] = None,
+        base_dir: Path | None = None,
+        engine: Engine | None = None,
+    ) -> None:
+        self.base_dir = base_dir or Path(__file__).resolve().parents[2]
+        self.office_id = office_id
+        self.engine = engine or self._make_engine_from_env()
+        LOGGER.info(
+            "FeatureBuilder initialized. db=%s office_id=%s",
+            self.engine.url,
+            self.office_id,
         )
 
-        y = df["mail_count"]
-        X = df.drop(columns=["mail_count", "mail_date"])
-        LOGGER.info("Feature matrix built: %s rows, %s columns", *X.shape)
-        return X, y
-
-    def predict(self, predict_date: str | date, run_id: str | None = None) -> int:
-        """単一日 `predict_date` の需要を予測し整数で返す"""
-        if isinstance(predict_date, str):
-            predict_date = date.fromisoformat(predict_date)
-
-        # build features for the target day based on historical df
-        df_hist = self._load_mail()
-        last_row = df_hist.iloc[-1:].copy()
-
-        # extend to target date (simple example: previous day)
-        target_row = last_row.copy()
-        target_row["mail_date"] = predict_date
-        target_row["mail_count"] = pd.NA
-        df = pd.concat([df_hist, target_row], ignore_index=True)
-
-        df = (
-            df.pipe(self._add_date_features)
-            .pipe(self._add_lag_features)
-            .pipe(self._add_rolling_mean)
-        ).tail(1)
-
-        X_pred = df.drop(columns=["mail_count", "mail_date"])
-
-        # モデルロード
-        if run_id:
-            model_uri = f"runs:/{run_id}/model"
+    # ------------------------- DB 接続 -------------------------
+    def _make_engine_from_env(self) -> Engine:
+        database_url = os.getenv("DATABASE_URL")
+        if database_url:
+            url = database_url
         else:
-            model_uri = "models:/posms/Production"
+            user = os.getenv("POSTGRES_USER") or os.getenv("DB_USER")
+            pwd = os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD")
+            host = os.getenv("POSTGRES_HOST", "localhost")
+            port = os.getenv("POSTGRES_PORT", "5432")
+            name = os.getenv("POSTGRES_DB") or os.getenv("DB_NAME")
+            if not all([user, pwd, name]):
+                raise RuntimeError(
+                    "DB connection info is incomplete. "
+                    "Set DATABASE_URL or POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB."
+                )
+            url = URL.create(
+                "postgresql+psycopg2",
+                username=user,
+                password=pwd,
+                host=host,
+                port=int(port) if port else None,
+                database=name,
+            )
+        return create_engine(url, pool_pre_ping=True, future=True)
 
-        model: XGBRegressor = mlflow.pyfunc.load_model(model_uri).unwrap_python_model()  # type: ignore
-        pred = int(model.predict(X_pred)[0])
-        LOGGER.info("Predict %s → %d", predict_date, pred)
-        return pred
+    # ----------------------- テーブル解決 ----------------------
+    def _resolve_mail_table_name(self) -> str:
+        """
+        実在テーブル名を自動解決（大文字/小文字/別名に頑健）。
+        戻り値はクエリでそのまま使える文字列（引用が必要なら "MailVolume" を返す）。
+        """
+        insp = inspect(self.engine)
+        existing = set(insp.get_table_names(schema="public"))
 
-    # ------------------------------------------------------------------
-    # 4. ユーティリティ
-    # ------------------------------------------------------------------
-    def load_staff(self) -> pd.DataFrame:
-        """employees テーブルを DataFrame で取得"""
-        return pd.read_sql("SELECT * FROM employees", self.engine)
+        def norm(s: str) -> str:
+            return s.replace('"', "").lower()
+
+        candidates = ["mailvolume", '"MailVolume"', "mail_volume"]
+        existing_norm = {t.lower() for t in existing}
+        for c in candidates:
+            if norm(c) in existing_norm:
+                return c
+        raise RuntimeError(
+            f"MailVolume テーブルが見つかりません。存在テーブル={sorted(existing)} / 期待候補={candidates}"
+        )
+
+    # ----------------------- データ読み込み ---------------------
+    def _load_mail(self) -> pd.DataFrame:
+        """
+        MailVolume（もしくは同等名）から系列を読み込み。
+        必要列: date, office_id, actual_volume, price_increase_flag
+        """
+        tbl = self._resolve_mail_table_name()
+
+        if self.office_id is not None:
+            sql = f"""
+                SELECT "date", office_id, actual_volume, price_increase_flag
+                FROM {tbl}
+                WHERE office_id = :office_id
+                ORDER BY "date"
+            """
+            df = pd.read_sql(
+                text(sql),
+                self.engine,
+                params={"office_id": self.office_id},
+                parse_dates=["date"],
+            )
+        else:
+            sql = f"""
+                SELECT "date", office_id, actual_volume, price_increase_flag
+                FROM {tbl}
+                ORDER BY office_id, "date"
+            """
+            df = pd.read_sql(text(sql), self.engine, parse_dates=["date"])
+            n_offices = df["office_id"].nunique() if not df.empty else 0
+            if n_offices == 0:
+                raise ValueError("MailVolume が空です。データを投入してください。")
+            if n_offices > 1:
+                raise ValueError(
+                    "office_id を指定してください（複数局のデータが存在します）。"
+                )
+            self.office_id = int(df["office_id"].iloc[0])
+            df = df[df["office_id"] == self.office_id].copy()
+
+        if df.empty:
+            raise ValueError(
+                f"MailVolume に office_id={self.office_id} のデータがありません。"
+            )
+
+        # price_increase_flag を 0/1 に正規化（欠損は 0）
+        if "price_increase_flag" in df.columns:
+            df["price_increase_flag"] = (
+                df["price_increase_flag"].fillna(False).astype(bool).astype(int)
+            )
+        else:
+            df["price_increase_flag"] = 0
+
+        df = df.sort_values("date").reset_index(drop=True)
+        return df
+
+    # ----------------------- 祝日（jpholiday） -----------------
+    def _is_holiday_series(self, dates: pd.Series) -> pd.Series:
+        """
+        jpholiday で祝日判定。未インストール時は土日でフォールバック。
+        返り値: 0/1 の int Series（index は dates と同じ、name='is_holiday'）
+        """
+        try:
+            import jpholiday  # type: ignore
+
+            vals = dates.dt.date.map(lambda d: bool(jpholiday.is_holiday(d)))
+            return vals.astype(int).rename("is_holiday")
+        except Exception:
+            # フォールバック: 土日=祝日
+            vals = dates.dt.weekday >= 5
+            return vals.astype(int).rename("is_holiday")
+
+    # ----------------------- 特徴量生成 ------------------------
+    @staticmethod
+    def _assign_season(ts: pd.Timestamp) -> int:
+        """
+        1: 春 (3–5), 2: 夏 (6–8), 3: 秋 (9–11), 4: 冬 (12–2)
+        """
+        m = int(ts.month)
+        if m in (3, 4, 5):
+            return 1
+        elif m in (6, 7, 8):
+            return 2
+        elif m in (9, 10, 11):
+            return 3
+        else:
+            return 4
 
     @staticmethod
-    def load_yaml(path: Path) -> dict:
-        with open(path, "r", encoding="utf-8") as fh:
-            return yaml.safe_load(fh)
+    def _is_new_year(ts: pd.Timestamp) -> int:
+        # 正月（1/1-1/3）
+        return int(ts.month == 1 and 1 <= ts.day <= 3)
 
+    @staticmethod
+    def _is_obon(ts: pd.Timestamp) -> int:
+        # お盆（8/13-8/16）
+        return int(ts.month == 8 and 13 <= ts.day <= 16)
 
-# ---------------- CLI テスト ----------------
-if __name__ == "__main__":
-    fb = FeatureBuilder()
-    X, y = fb.build()
-    print(X.head())
-    print("Rows:", len(X), "Target mean:", y.mean())
+    def _add_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+
+        # dow & cyclic encoding
+        df["dow"] = df["date"].dt.weekday
+        df["dow_sin"] = np.sin(2 * np.pi * df["dow"] / 7.0)
+        df["dow_cos"] = np.cos(2 * np.pi * df["dow"] / 7.0)
+
+        # month & season（1:春=3-5, 2:夏=6-8, 3:秋=9-11, 4:冬=12-2）
+        df["month"] = df["date"].dt.month
+        df["season"] = df["date"].apply(self._assign_season).astype(int)
+
+        # holiday flags（jpholiday）
+        hol = self._is_holiday_series(df["date"])
+        df = df.join(hol)
+        df["is_after_holiday"] = df["is_holiday"].shift(1, fill_value=0).astype(int)
+        df["is_after_after_holiday"] = (
+            df["is_holiday"].shift(2, fill_value=0).astype(int)
+        )
+
+        # event flags
+        df["is_new_year"] = df["date"].apply(self._is_new_year).astype(int)
+        df["is_obon"] = df["date"].apply(self._is_obon).astype(int)
+
+        # lags & rolling
+        df["lag_1"] = df["actual_volume"].shift(1)
+        df["lag_7"] = df["actual_volume"].shift(7)
+        df["rolling_mean_7"] = df["actual_volume"].shift(1).rolling(7).mean()
+
+        # price flag は _load_mail で 0/1 化済み
+        # 列の存在を保証（通常は全て揃う想定）
+        for c in FEATURE_COLUMNS:
+            if c not in df.columns:
+                df[c] = 0
+
+        return df
+
+    def _features_df(self, *, dropna: bool) -> pd.DataFrame:
+        base = self._load_mail()
+        out = self._add_features(base)
+        if dropna:
+            # 学習では特徴量の欠損行を落とし、目的変数も欠損なしに限定
+            out = out.dropna(subset=FEATURE_COLUMNS + ["actual_volume"])
+        return out.reset_index(drop=True)
+
+    # ------------------------- 外部 API -------------------------
+    def build(self) -> tuple[pd.DataFrame, pd.Series]:
+        """
+        学習データを返す。
+        Returns
+        -------
+        X : pandas.DataFrame（FEATURE_COLUMNS の順序で固定）
+        y : pandas.Series（actual_volume）
+        """
+        df = self._features_df(dropna=True)
+        X = df[FEATURE_COLUMNS].astype(float)
+        y = df["actual_volume"].astype(float)
+        LOGGER.info("Feature matrix built: rows=%d, cols=%d", *X.shape)
+        return X, y
+
+    def build_with_dates(self, *, dropna: bool = True) -> pd.DataFrame:
+        """
+        解析/デバッグ用に、日付・目的変数・特徴量を含む DataFrame を返す。
+        dropna=False にすると将来日の行も残す（actual_volume が NULL のまま）。
+        """
+        df = self._features_df(dropna=dropna)
+        cols = ["date", "office_id", "actual_volume"] + FEATURE_COLUMNS
+        return df[cols]
+
+    def predict(
+        self,
+        target_date: str | date,
+        *,
+        run_id: Optional[str] = None,
+        stage: Optional[str] = "Production",
+        model_name: str = "posms",
+        tracking_uri: Optional[str] = None,
+    ) -> float:
+        """
+        単一日の予測値を返す（office_id 固定）。
+
+        既存 DB に対象日の行が存在しなくても、履歴から 1 行合成して特徴量を作る
+        （lag/rolling は履歴ベース）。直近の実績が不足している場合はエラー。
+        """
+        base = self._load_mail()
+        tgt = pd.to_datetime(str(target_date)).date()
+
+        # 対象日行が無ければ 1 行合成（actual_volume=NULL, price_increase_flag=0）
+        if (base["date"].dt.date == tgt).sum() == 0:
+            new_row = {
+                "date": pd.Timestamp(tgt),
+                "office_id": self.office_id,
+                "actual_volume": np.nan,
+                "price_increase_flag": 0,
+            }
+            base = pd.concat(
+                [base, pd.DataFrame([new_row])], ignore_index=True
+            ).sort_values("date")
+
+        # 特徴量作成（dropna しない）
+        all_df = self._add_features(base).reset_index(drop=True)
+        row = all_df.loc[all_df["date"].dt.date == tgt]
+        if row.empty:
+            raise ValueError(
+                f"対象日の行が作成できませんでした: date={tgt}, office_id={self.office_id}"
+            )
+
+        # 必要特徴量が欠損なら学習時と同等の入力がつくれない
+        if row[FEATURE_COLUMNS].isna().any(axis=None):
+            raise ValueError(
+                "対象日の特徴量に欠損があります。直近の実績（前日および過去7日）と祝日情報を投入してください。"
+            )
+
+        X_row = row[FEATURE_COLUMNS].astype(float)
+        pred = (
+            ModelPredictor(
+                run_id=run_id,
+                stage=stage,
+                model_name=model_name,
+                tracking_uri=tracking_uri,
+            ).predict(X_row)
+        )[0]
+        LOGGER.info("Predict %s → %.2f (office_id=%s)", tgt, pred, self.office_id)
+        return float(pred)

@@ -19,7 +19,7 @@ from __future__ import annotations
 # サブモジュールの公開 API をトップレベルで re‑export
 try:
     from .extractor import ExcelExtractor  # noqa: F401
-    from .loader import DbLoader          # noqa: F401
+    from .loader import DbLoader  # noqa: F401
 except ModuleNotFoundError:
     # 開発初期でまだ実装ファイルが無い場合でもパッケージ import が失敗しないように
     pass

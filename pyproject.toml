@@ -1,48 +1,49 @@
-[tool.poetry]
+[project]
 name = "posms"
 version = "0.1.0"
 description = "郵便物数予測とシフト自動作成を統合した MLOps パイプライン"
-authors = ["Tatsuru Hiraoka"]
-license = "MIT"
 readme = "README.md"
-packages = [{ include = "posms" }]
+authors = [{ name = "Tatsuru Hiraoka" }]
+requires-python = ">=3.11,<3.12"
+license = { file = "LICENSE" }
+classifiers = [
+  "License :: Other/Proprietary License",
+  "Programming Language :: Python :: 3",
+]
 
-# ------------------ runtime deps ------------------
-[tool.poetry.dependencies]
-python          = "^3.11"
-pandas          = "^2.2"
-numpy           = "^1.26"
-scipy           = "^1.13"
-scikit-learn    = "^1.4"
-xgboost         = "^2.0"
-sqlalchemy      = "^2.0"
-psycopg2-binary = "^2.9"
-openpyxl        = "^3.1"
-xlwings         = "^0.30"
-pulp            = "^2.8"
-prefect         = "^2.18"
-mlflow          = "^2.12"
-pyyaml          = "^6.0"
-typer           = "^0.12"
-python-dotenv   = "^1.0"
-dvc             = { extras = ["s3"], version = "^3.50" }
+# ランタイム依存（PEP 508 形式）
+dependencies = [
+  "pandas>=2.2",
+  "numpy>=1.26",
+  "scipy>=1.13",
+  "scikit-learn>=1.4",
+  "xgboost>=2.0",
+  "sqlalchemy>=2.0",
+  "psycopg2-binary>=2.9",
+  "openpyxl>=3.1",
+  "xlwings>=0.30",
+  "pulp>=2.8",
+  "prefect>=2.18",
+  "mlflow>=2.12",
+  "pyyaml>=6.0",
+  "typer>=0.12",
+  "dvc[s3]>=3.50",
+  "jpholiday"
+]
 
-# ------------------ dev / ci deps ------------------
+[project.scripts]
+posms = "posms.cli:app"
+
+# 開発系（PEP 621 には dev 依存の標準がないため Poetry のグループを継続）
 [tool.poetry.group.dev.dependencies]
-pytest   = "^7.4"
-ruff     = "^0.4"
-black    = "^24.4"
-mypy     = "^1.10"
+pytest = "^7.4"
+ruff   = "^0.4"
+black  = "^24.4"
+mypy   = "^1.10"
 
-# (任意) Notebook 専用グループ
 [tool.poetry.group.notebook.dependencies]
 jupyterlab = "^4.2"
 
-# ------------------ CLI entry ------------------
-[tool.poetry.scripts]
-posms = "posms.cli:app"
-
-# ------------------ build system ------------------
 [build-system]
 requires = ["poetry-core>=1.8.0"]
 build-backend = "poetry.core.masonry.api"

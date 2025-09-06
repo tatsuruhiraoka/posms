@@ -28,7 +28,9 @@ import xlwings as xw
 from pulp import LpBinary, LpMinimize, LpProblem, LpVariable, lpSum, PULP_CBC_CMD
 
 LOGGER = logging.getLogger("posms.optimization.shift_builder")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
 
 class OutputType(str, Enum):
@@ -153,9 +155,7 @@ if __name__ == "__main__":
     dates = pd.date_range("2025-08-01", periods=5, freq="D")
     demand = pd.Series([100, 120, 90, 110, 80], index=dates.date)
 
-    staff = pd.DataFrame(
-        {"emp_id": [1, 2, 3, 4, 5], "capacity": [30, 25, 20, 25, 30]}
-    )
+    staff = pd.DataFrame({"emp_id": [1, 2, 3, 4, 5], "capacity": [30, 25, 20, 25, 30]})
 
     tpl = Path("excel_templates/shift_template.xlsx")
     ShiftBuilder(tpl).build(demand, staff, OutputType.分担表案)
