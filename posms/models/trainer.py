@@ -7,18 +7,25 @@ ModelTrainer
 ------------
 * XGBoost Regressor を学習
 * MLflow に Metrics・Params・Model を記録（ゼロ設定：<repo>/mlruns）
+* 代表的なグラフ/CSV を Artifacts に保存：
+    - pred_vs_actual_val.png
+    - residuals_hist_val.png
+    - learning_curve_rmse.png（evals_result_ が得られた場合）
+    - feature_importance.png（上位特徴量）
+    - val_predictions.csv（検証の y_true / y_pred / residual）
 * 終了時に run_id を返却。必要に応じて Model Registry へ登録（利用可能な場合）
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import mlflow
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, r2_score
 from xgboost import XGBRegressor
 
 from .._mlflow import set_tracking_uri_zero_config
@@ -83,7 +90,9 @@ class ModelTrainer:
         val_split: float = 0.2,
         es_rounds: int = 50,
     ) -> str:
-        """学習を実行し、run_id を返す。"""
+        """
+        学習を実行し、run_id を返す。MLflow に Metrics と（可能なら）グラフ/CSV も記録する。
+        """
         model = XGBRegressor(**self.params)
 
         with mlflow.start_run(tags=tags) as run:
@@ -111,20 +120,44 @@ class ModelTrainer:
             preds_tr = model.predict(X_tr)
             rmse_tr = rmse_metric(y_tr, preds_tr)
             mae_tr = mean_absolute_error(y_tr, preds_tr)
+            r2_tr = r2_score(y_tr, preds_tr)
+            mape_tr = float(
+                np.mean(np.abs(y_tr - preds_tr) / np.maximum(1e-6, np.abs(y_tr))) * 100.0
+            )
 
-            metrics = {"rmse_train": float(rmse_tr), "mae_train": float(mae_tr)}
+            metrics: Dict[str, float] = {
+                "rmse_train": float(rmse_tr),
+                "mae_train": float(mae_tr),
+                "r2_train": float(r2_tr),
+                "mape_train": float(mape_tr),
+            }
+            preds_val = None
             if use_val and X_val is not None:
                 preds_val = model.predict(X_val)
                 rmse_val = rmse_metric(y_val, preds_val)  # type: ignore[arg-type]
                 mae_val = mean_absolute_error(y_val, preds_val)  # type: ignore[arg-type]
-                metrics.update({"rmse_val": float(rmse_val), "mae_val": float(mae_val)})
+                r2_val = r2_score(y_val, preds_val)  # type: ignore[arg-type]
+                mape_val = float(
+                    np.mean(np.abs(y_val - preds_val) / np.maximum(1e-6, np.abs(y_val))) * 100.0  # type: ignore[arg-type]
+                )
+                metrics.update(
+                    {
+                        "rmse_val": float(rmse_val),
+                        "mae_val": float(mae_val),
+                        "r2_val": float(r2_val),
+                        "mape_val": float(mape_val),
+                    }
+                )
 
             LOGGER.info(
-                "Done. RMSE(train)=%.3f, MAE(train)=%.3f%s",
+                "Done. RMSE(train)=%.3f, MAE(train)=%.3f, R2(train)=%.3f, MAPE(train)=%.2f%%%s",
                 metrics["rmse_train"],
                 metrics["mae_train"],
+                metrics["r2_train"],
+                metrics["mape_train"],
                 (
-                    f", RMSE(val)={metrics.get('rmse_val'):.3f}, MAE(val)={metrics.get('mae_val'):.3f}"
+                    f", RMSE(val)={metrics.get('rmse_val'):.3f}, MAE(val)={metrics.get('mae_val'):.3f}, "
+                    f"R2(val)={metrics.get('r2_val'):.3f}, MAPE(val)={metrics.get('mape_val'):.2f}%"
                     if "rmse_val" in metrics
                     else ""
                 ),
@@ -133,6 +166,99 @@ class ModelTrainer:
             # ---- ログ ----
             mlflow.log_params(self.params)
             mlflow.log_metrics(metrics)
+
+            # ---- 可視化/CSV（matplotlib 等が無ければ自動スキップ）----
+            outdir = Path("/tmp/posms_train")
+            outdir.mkdir(parents=True, exist_ok=True)
+            try:
+                import matplotlib.pyplot as plt  # optional
+
+                if use_val and X_val is not None and preds_val is not None:
+                    # 1) 予測 vs 実測（検証）
+                    fig = plt.figure(figsize=(5.5, 4.0))
+                    ax = fig.add_subplot(111)
+                    ax.scatter(y_val, preds_val, s=10)  # type: ignore[arg-type]
+                    lo = float(min(np.min(y_val), np.min(preds_val)))  # type: ignore[arg-type]
+                    hi = float(max(np.max(y_val), np.max(preds_val)))  # type: ignore[arg-type]
+                    ax.plot([lo, hi], [lo, hi], linestyle="--")
+                    ax.set_xlabel("Actual (val)")
+                    ax.set_ylabel("Predicted (val)")
+                    ax.set_title("Predicted vs Actual (Validation)")
+                    fig.tight_layout()
+                    fig.savefig(outdir / "pred_vs_actual_val.png", dpi=160)
+                    plt.close(fig)
+
+                    # 2) 残差ヒスト（検証）
+                    fig = plt.figure(figsize=(5.5, 4.0))
+                    ax = fig.add_subplot(111)
+                    ax.hist((y_val - preds_val), bins=30)  # type: ignore[operator]
+                    ax.set_xlabel("Residual (val)")
+                    ax.set_ylabel("Count")
+                    ax.set_title("Residuals Histogram (Validation)")
+                    fig.tight_layout()
+                    fig.savefig(outdir / "residuals_hist_val.png", dpi=160)
+                    plt.close(fig)
+
+                # 3) 学習曲線（evals_result_ があれば）
+                try:
+                    ev = model.evals_result()
+                    # この実装では eval_set に validation のみを渡しているので 'validation_0'
+                    if "validation_0" in ev and "rmse" in ev["validation_0"]:
+                        fig = plt.figure(figsize=(5.8, 3.8))
+                        ax = fig.add_subplot(111)
+                        ax.plot(ev["validation_0"]["rmse"], label="val")
+                        ax.set_xlabel("Iteration")
+                        ax.set_ylabel("RMSE")
+                        ax.set_title("Learning Curve (RMSE)")
+                        ax.legend()
+                        fig.tight_layout()
+                        fig.savefig(outdir / "learning_curve_rmse.png", dpi=160)
+                        plt.close(fig)
+                except Exception:
+                    pass
+
+                # 4) 特徴量重要度（上位30）
+                try:
+                    if hasattr(model, "feature_importances_"):
+                        imp = (
+                            pd.Series(model.feature_importances_, index=X.columns)
+                            .sort_values(ascending=False)
+                            .head(30)
+                        )
+                    else:
+                        imp_dict = model.get_booster().get_score(importance_type="gain")
+                        imp = (
+                            pd.Series({c: imp_dict.get(c, 0.0) for c in X.columns})
+                            .sort_values(ascending=False)
+                            .head(30)
+                        )
+                    fig = plt.figure(figsize=(6.0, 6.5))
+                    ax = fig.add_subplot(111)
+                    imp[::-1].plot(kind="barh", ax=ax)
+                    ax.set_title("Feature Importance (Top 30)")
+                    ax.set_xlabel("Importance")
+                    fig.tight_layout()
+                    fig.savefig(outdir / "feature_importance.png", dpi=160)
+                    plt.close(fig)
+                except Exception:
+                    pass
+            except Exception:
+                # matplotlib 未導入などは静かにスキップ
+                pass
+
+            # 検証予測 CSV
+            try:
+                if use_val and X_val is not None and preds_val is not None:
+                    val_df = pd.DataFrame(
+                        {
+                            "y_true": y_val,  # type: ignore[arg-type]
+                            "y_pred": preds_val,
+                            "residual": (y_val - preds_val),  # type: ignore[operator]
+                        }
+                    )
+                    val_df.to_csv(outdir / "val_predictions.csv", index=False)
+            except Exception:
+                pass
 
             # 署名と入力例（列名固定 & 将来の推論安全性向上）
             try:

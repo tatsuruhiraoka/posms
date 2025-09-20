@@ -24,10 +24,10 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow            
     container_name: posms-mlflow
-    depends_on:
-      db:
-        condition: service_healthy
-    command: ["mlflow","server","--backend-store-uri","file:/mlruns","--default-artifact-root","/mlruns","-h","0.0.0.0"]
+    command: ["mlflow","server",
+            "--backend-store-uri","sqlite:////mlruns/mlflow.db",
+            "--default-artifact-root","/mlruns",
+            "-h","0.0.0.0","-p","5000"]
     volumes: [mlruns:/mlruns]
     ports: ["127.0.0.1:15000:5000"]
 
@@ -41,13 +41,14 @@ services:
 
   # ---------- アプリ本体 ----------
   app:
-    image: ghcr.io/hiraokatatsuru/posms-app:latest
+    image: ghcr.io/tatsuruhiraoka/posms-app:latest
+    pull_policy: always
     container_name: posms-app
     restart: on-failure
     environment:
       # 内部ネットワーク参照（.env 不要）
       PREFECT_API_URL: http://prefect:4200/api
-      DB_URL: postgresql+psycopg2://posms@db:5432/posms
+      DATABASE_URL: postgresql+psycopg2://posms@db:5432/posms
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_EXPERIMENT_NAME: posms
       ENVIRONMENT: development

@@ -1,4 +1,4 @@
-# mail_forecast_and_shift_builder
+# postal-operation-shift-management-system
 
 郵便物数の予測とシフト最適化を組み合わせた最小構成のデモプロジェクトです。
 

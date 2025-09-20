@@ -26,6 +26,7 @@ from typing import Optional, List
 
 import numpy as np
 import pandas as pd
+import jpholiday
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.engine import URL, Engine
 
@@ -183,18 +184,11 @@ class FeatureBuilder:
     # ----------------------- 祝日（jpholiday） -----------------
     def _is_holiday_series(self, dates: pd.Series) -> pd.Series:
         """
-        jpholiday で祝日判定。未インストール時は土日でフォールバック。
+        jpholiday で祝日判定。
         返り値: 0/1 の int Series（index は dates と同じ、name='is_holiday'）
         """
-        try:
-            import jpholiday  # type: ignore
-
-            vals = dates.dt.date.map(lambda d: bool(jpholiday.is_holiday(d)))
-            return vals.astype(int).rename("is_holiday")
-        except Exception:
-            # フォールバック: 土日=祝日
-            vals = dates.dt.weekday >= 5
-            return vals.astype(int).rename("is_holiday")
+        vals = dates.dt.date.map(lambda d: bool(jpholiday.is_holiday(d)))
+        return vals.astype(int).rename("is_holiday")
 
     # ----------------------- 特徴量生成 ------------------------
     @staticmethod

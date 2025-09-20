@@ -2,123 +2,144 @@
 posms.flows.monthly_flow
 ========================
 
-月次バッチフロー : Excel → DB → XGBoost 再学習 → 需要予測 → シフト最適化
+役割
+----
+- 毎月1日にモデル再学習を実行する Prefect Flow。
 
-実行方法
---------
-1. ローカル関数として
-   >>> from posms.flows.monthly_flow import monthly_refresh
-   >>> monthly_refresh(predict_date="2025-08-01")
+前提
+----
+- データは既に DB に投入済み（Excel は使わない）。
+- 特徴量生成は FeatureBuilder().build() に委譲。
+- 学習・MLflow へのロギングは ModelTrainer に委譲。
 
-2. CLI
-   $ poetry run posms run-monthly --predict-date 2025-08-01
+使い方
+------
+# 即時実行（テスト）
+>>> from posms.flows.monthly_flow import monthly_train
+>>> monthly_train(force=True)
 
-3. Prefect Deployment
-   $ prefect deploy -n monthly configs/monthly_job.yaml
+# Prefect デプロイ（UIで毎月1日のスケジュールを付与）
+$ prefect deployment build posms/flows/monthly_flow.py:monthly_train -n eom-train -p posms-pool -a
 """
 
 from __future__ import annotations
 
+import os
 import logging
 from datetime import date
-from pathlib import Path
+from typing import Optional, Tuple
 
-from prefect import flow, task
+import pandas as pd
+from prefect import flow, task, get_run_logger
 
-from posms.etl.extractor import ExcelExtractor
-from posms.etl.load_to_db import DbLoader
 from posms.features.builder import FeatureBuilder
 from posms.models.trainer import ModelTrainer
-from posms.optimization.shift_builder import OutputType, ShiftBuilder
 
 LOGGER = logging.getLogger("posms.flows.monthly_flow")
 
 
-# ---------------- Prefect Tasks ----------------
-@task(name="Extract Excel → CSV")
-def extract_task() -> None:
-    ExcelExtractor().run_all()
+# ---------------- 内部ユーティリティ ----------------
+def _is_first_day_of_month(d: date) -> bool:
+    """本日が「毎月1日」かどうか。"""
+    return d.day == 1
 
 
-@task(name="Load CSV → PostgreSQL")
-def load_task() -> None:
-    DbLoader().run_all()
+# ---------------- Tasks ----------------
+@task(name="Build features from DB")
+def build_features_from_db() -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    DB から学習用の (X, y) を構築。
+    実装はプロジェクトの FeatureBuilder に依存。
+    """
+    X, y = FeatureBuilder().build()  # -> (pd.DataFrame, pd.Series)
+    if len(X) == 0 or len(y) == 0:
+        raise RuntimeError("学習用特徴量が空です（DB のデータ期間を確認してください）。")
+    return X, y
 
 
-@task(name="Model Training")
-def train_task() -> str:
-    X, y = FeatureBuilder().build()
-    run_id = ModelTrainer().train(X, y, auto_register=True)
+@task(name="Train model")
+def train_model(
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    experiment: str,
+    tracking_uri: str,
+    auto_register: bool,
+    val_split: float,
+    es_rounds: int,
+) -> str:
+    """
+    ModelTrainer で学習し、MLflow にロギング。
+    auto_register=True の場合、MLflow Model Registry に登録まで行う
+    （※Registry を使うには MLflow バックエンドを SQLite/Postgres に）。
+    """
+    trainer = ModelTrainer(experiment=experiment, tracking_uri=tracking_uri)
+    run_id = trainer.train(
+        X=X,
+        y=y,
+        auto_register=auto_register,
+        val_split=val_split,
+        es_rounds=es_rounds,
+        tags={"pipeline": "monthly_train"},
+    )
     return run_id
 
 
-@task(name="Demand Forecast")
-def predict_task(predict_date: str, run_id: str) -> int:
-    fb = FeatureBuilder()
-    demand_val = fb.predict(predict_date, run_id)
-    return demand_val
+# ---------------- Flow ----------------
+@flow(name="monthly_train")
+def monthly_train(
+    *,
+    # 実行ガード
+    first_day_guard: bool = True,      # True: 「毎月1日」以外はスキップ
+    force: bool = False,               # テスト用: True でガード無視
+    # 学習ハイパー
+    val_split: float = 0.2,
+    es_rounds: int = 50,
+    # MLflow/Registry
+    mlflow_experiment: Optional[str] = None,   # 既定: env MLFLOW_EXPERIMENT_NAME or "posms"
+    mlflow_tracking_uri: Optional[str] = None, # 既定: env MLFLOW_TRACKING_URI or "http://mlflow:5000"
+    auto_register: bool = False,               # True にするなら MLflow を SQL バックエンドに
+) -> dict:
+    """
+    毎月1日にモデル再学習だけを行うフロー（Excel 不使用、DB のみ）。
 
+    Returns
+    -------
+    dict: {"run_id": str|None, "skipped": bool, "today": "YYYY-MM-DD", "n_samples": int}
+    """
+    logger = get_run_logger()
 
-@task(name="Shift Optimization & Excel Output")
-def optimize_task(
-    predict_date: str,
-    demand_val: int,
-    output_type: OutputType,
-    template: Path,
-) -> Path:
-    # demand Series を1日分で組み立て
-    demand_series = (
-        FeatureBuilder()
-        ._load_mail()  # noqa: SLF001 使用済の内部メソッドだが簡易に
-        .iloc[[-1]]
-        .assign(mail_date=predict_date, mail_count=demand_val)
-        .set_index("mail_date")["mail_count"]
+    # --- 1日ガード ---
+    today = date.today()
+    if first_day_guard and (not force) and (not _is_first_day_of_month(today)):
+        msg = f"Skip: {today.isoformat()} は毎月1日ではありません（force=False）"
+        logger.info(msg)
+        return {"skipped": True, "today": today.isoformat(), "run_id": None, "n_samples": 0}
+
+    # --- 特徴量構築 ---
+    X, y = build_features_from_db()
+    n_samples = len(X)
+
+    # --- MLflow 設定 ---
+    experiment = mlflow_experiment or os.getenv("MLFLOW_EXPERIMENT_NAME", "posms")
+    tracking_uri = mlflow_tracking_uri or os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+
+    # --- 学習 ---
+    run_id = train_model(
+        X,
+        y,
+        experiment=experiment,
+        tracking_uri=tracking_uri,
+        auto_register=auto_register,
+        val_split=val_split,
+        es_rounds=es_rounds,
     )
 
-    staff_df = FeatureBuilder().load_staff()
-    sb = ShiftBuilder(template)
-    return sb.build(demand_series, staff_df, output_type)
-
-
-# ---------------- Prefect Flow ----------------
-@flow(name="monthly_refresh")
-def monthly_refresh(
-    predict_date: str = str(date.today()),
-    output_type: str = "分担表",
-    excel_template: str = "excel_templates/shift_template.xlsx",
-):
-    """
-    Parameters
-    ----------
-    predict_date : str
-        需要予測 & シフト対象日 (YYYY-MM-DD)
-    output_type : str
-        分担表 / 勤務指定表 / 分担表案
-    excel_template : str
-        テンプレート Excel パス
-    """
-    # ETL
-    extract_task()
-    load_task()
-
-    # ML 学習
-    run_id = train_task()
-
-    # 需要予測
-    demand_val = predict_task(predict_date, run_id)
-
-    # シフト最適化
-    excel_path = optimize_task(
-        predict_date,
-        demand_val,
-        OutputType(output_type),
-        Path(excel_template),
-    )
-
-    LOGGER.info("Flow succeeded. Excel saved → %s", excel_path.resolve())
-    return {"excel_path": str(excel_path)}
+    logger.info("Monthly training completed. run_id=%s, samples=%s", run_id, n_samples)
+    return {"skipped": False, "today": today.isoformat(), "run_id": run_id, "n_samples": n_samples}
 
 
 # ---------------- CLI / Debug -----------------
 if __name__ == "__main__":
-    monthly_refresh()
+    # デバッグ実行（強制実行）
+    print(monthly_train(force=True))
