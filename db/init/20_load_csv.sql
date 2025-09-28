@@ -4,6 +4,9 @@
 -- ローカル（Compose自動実行/手動実行） … デフォルトで /docker-entrypoint-initdb.d/csv/*.csv を読む
 --CI（GitHub Actions） … psql 実行時に -v csvdir='db/init/csv' を渡して、リポジトリ内の CSV を読む
 \if :{?csvdir} \else \set csvdir '/docker-entrypoint-initdb.d/csv' \endif
+
+-- ★ Zone の既定ステータス（未指定時）。実行時に -v で上書き可
+\if :{?default_zone_status} \else \set default_zone_status '通配' \endif
 ------------------------------------------------------------
 -- 1) JobType  (jobtypes.csv)
 --   job_code,classification,job_name,start_time,end_time,work_hours,crosses_midnight
@@ -50,6 +53,7 @@ CREATE TEMP TABLE stage_zone (
   is_active          boolean
 );
 
+-- 推奨：固定パスの代わりに csvdir を使う
 COPY stage_zone(department_code, team_name, zone_name, operational_status, is_active)
 FROM '/docker-entrypoint-initdb.d/csv/zones.csv'
 WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
@@ -59,7 +63,7 @@ INSERT INTO Zone (team_id, zone_name, operational_status, is_active, updated_at)
 SELECT
   t.team_id,
   s.zone_name,
-  COALESCE(NULLIF(s.operational_status,''), 'active'),
+  COALESCE(NULLIF(btrim(s.operational_status), ''), :'default_zone_status'),
   COALESCE(s.is_active, TRUE),
   NOW()
 FROM stage_zone s
@@ -68,10 +72,11 @@ JOIN Team       t ON t.department_id   = d.department_id
                  AND t.team_name       = s.team_name
 ON CONFLICT ON CONSTRAINT zone_unique_per_team
 DO UPDATE SET
-  operational_status = EXCLUDED.operational_status,
-  is_active          = EXCLUDED.is_active,
+  operational_status = COALESCE(NULLIF(btrim(EXCLUDED.operational_status), ''), Zone.operational_status),
+  is_active          = COALESCE(EXCLUDED.is_active, Zone.is_active),
   updated_at         = NOW();
 COMMIT;
+
 
 ------------------------------------------------------------
 -- 3) DemandProfile  (demand_profiles.csv)  ※ zone_code 不要
@@ -312,4 +317,30 @@ SET available_mon = EXCLUDED.available_mon,
     available_sat = EXCLUDED.available_sat,
     available_sun = EXCLUDED.available_sun,
     available_hol = EXCLUDED.available_hol;
+COMMIT;
+
+------------------------------------------------------------
+-- 8) Holiday (holidays_jp_2020_2050.csv)
+--   CSV 想定: date,name  例) 2020-01-01,元日
+--   -v holiday_csv=... でファイル名を差し替え可
+------------------------------------------------------------
+\if :{?holiday_csv} \else \set holiday_csv 'holidays_jp_2020_2050.csv' \endif
+
+-- 取り込み用ステージング
+DROP TABLE IF EXISTS stage_holiday;
+CREATE TEMP TABLE stage_holiday (
+  holiday_date date,
+  name         text
+);
+
+COPY stage_holiday (holiday_date, name)
+FROM '/docker-entrypoint-initdb.d/csv/holidays_jp_2020_2050.csv'
+WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+
+BEGIN;
+INSERT INTO "Holiday" (holiday_date, name)
+SELECT holiday_date, name
+FROM stage_holiday
+ON CONFLICT (holiday_date) DO UPDATE
+SET name = EXCLUDED.name;  -- 名称の表記修正などがあれば上書き
 COMMIT;

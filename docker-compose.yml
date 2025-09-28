@@ -1,6 +1,5 @@
 name: posms
 services:
-  # ---------- PostgreSQL ----------
   db:
     image: postgres:16-alpine
     container_name: posms-db
@@ -8,8 +7,7 @@ services:
     environment:
       POSTGRES_USER: posms
       POSTGRES_DB: posms
-      # ← 初期化時のみ有効。trust 認証でパスワードなし起動（開発/CI専用）
-      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_HOST_AUTH_METHOD: trust   # 開発/CI用
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
@@ -20,39 +18,77 @@ services:
       timeout: 3s
       retries: 20
 
-  # ---------- MLflow ----------
   mlflow:
-    image: ghcr.io/mlflow/mlflow            
+    image: ghcr.io/mlflow/mlflow:v2.16.2
     container_name: posms-mlflow
     command: ["mlflow","server",
-            "--backend-store-uri","sqlite:////mlruns/mlflow.db",
-            "--default-artifact-root","/mlruns",
-            "-h","0.0.0.0","-p","5000"]
+      "--backend-store-uri","sqlite:////mlruns/mlflow.db",
+      "--default-artifact-root","file:/mlruns",
+      "-h","0.0.0.0","-p","5000"]
     volumes: [mlruns:/mlruns]
     ports: ["127.0.0.1:15000:5000"]
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL","curl -fsS http://localhost:5000/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
-  # ---------- Prefect OSS (UI + API) ----------
   prefect:
     image: prefecthq/prefect:2.18-python3.11
     container_name: posms-prefect
     command: ["prefect","server","start","--host","0.0.0.0","--port","4200"]
-    volumes: [prefect_data:/root/.prefect]     # 実行履歴を永続化
+    volumes: [prefect_data:/root/.prefect]
     ports: ["127.0.0.1:4200:4200"]
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health'); print('OK')\" || exit 1"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 30
 
-  # ---------- アプリ本体 ----------
-  app:
-    image: ghcr.io/tatsuruhiraoka/posms-app:latest
-    pull_policy: always
-    container_name: posms-app
-    restart: on-failure
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: posms-worker
+    restart: always
     environment:
-      # 内部ネットワーク参照（.env 不要）
       PREFECT_API_URL: http://prefect:4200/api
       DATABASE_URL: postgresql+psycopg2://posms@db:5432/posms
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_EXPERIMENT_NAME: posms
       ENVIRONMENT: development
       LOG_LEVEL: INFO
+      PREFECT_LOGGING_LEVEL: INFO
+      PREFECT_LOGGING_EXTRA_LOGGERS: posms,posms.flows,posms.models
+    depends_on:
+      prefect:
+        condition: service_started
+      mlflow:
+        condition: service_started
+      db:
+        condition: service_healthy
+    volumes: [.:/app]     # 開発中はソースをマウント
+    working_dir: /app
+    command: ["sh","-lc","until curl -fsS http://prefect:4200/ >/dev/null; do sleep 2; done; prefect work-pool create posms-pool --type process || true; exec prefect worker start --pool posms-pool --type process"]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: posms-app
+    restart: on-failure
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
+      DATABASE_URL: postgresql+psycopg2://posms@db:5432/posms
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_EXPERIMENT_NAME: posms
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      PREFECT_LOGGING_LEVEL: INFO
+      PREFECT_LOGGING_EXTRA_LOGGERS: posms,posms.flows,posms.models
     depends_on:
       db:
         condition: service_healthy
@@ -62,8 +98,7 @@ services:
         condition: service_started
     volumes: [.:/app]
     working_dir: /app
-    # 実行コマンドは Dockerfile の CMD に記述
-    # 例) python posms/flows/monthly_flow.py
+    # command: ["posms","--help"]   # 必要に応じて上書き
 
 volumes:
   db_data:

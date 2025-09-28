@@ -161,6 +161,15 @@ CREATE TABLE EmployeeAvailability (
   available_hol  BOOLEAN NOT NULL DEFAULT FALSE
 );
 
+CREATE TABLE IF NOT EXISTS "Holiday" (
+  "holiday_date" date PRIMARY KEY,
+  "name"         text NOT NULL
+);
+
+-- 期間で取りやすいように（範囲検索に効く）
+CREATE INDEX IF NOT EXISTS idx_holiday_date ON "Holiday" ("holiday_date");
+
+
 -- 5. シフトアサイン
 CREATE TABLE ShiftAssignment (
   employee_id     INT  NOT NULL REFERENCES Employee(employee_id),

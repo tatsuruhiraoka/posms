@@ -184,11 +184,14 @@ class FeatureBuilder:
     # ----------------------- 祝日（jpholiday） -----------------
     def _is_holiday_series(self, dates: pd.Series) -> pd.Series:
         """
-        jpholiday で祝日判定。
-        返り値: 0/1 の int Series（index は dates と同じ、name='is_holiday'）
+        祝日判定 + 週末を含めた「非稼働日」。
+        戻り値: 0/1 int Series（name='is_holiday' として返す）
         """
-        vals = dates.dt.date.map(lambda d: bool(jpholiday.is_holiday(d)))
-        return vals.astype(int).rename("is_holiday")
+        dates = pd.to_datetime(dates)
+        is_pub_holiday = dates.dt.date.map(lambda d: bool(jpholiday.is_holiday(d))).astype(int)
+        is_weekend = (dates.dt.weekday >= 5).astype(int)
+        non_working = ((is_pub_holiday == 1) | (is_weekend == 1)).astype(int)
+        return non_working.rename("is_holiday")
 
     # ----------------------- 特徴量生成 ------------------------
     @staticmethod

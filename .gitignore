@@ -76,6 +76,7 @@ docker-compose.override.yml
 .ruff_cache/
 .pytype/
 
+
 # OS ごみ
 Thumbs.db
 ehthumbs.db

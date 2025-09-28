@@ -1,28 +1,38 @@
+-- db/init/20_load_csv_ci.sql  (CI 専用ドライバ)
 \set ON_ERROR_STOP on
+\timing on
 SET client_encoding TO 'UTF8';
 SET DateStyle = 'ISO, YMD';
 
-TRUNCATE TABLE employee RESTART IDENTITY;
-TRUNCATE TABLE job_type RESTART IDENTITY;
-TRUNCATE TABLE zone RESTART IDENTITY;
-TRUNCATE TABLE demand_profile RESTART IDENTITY;
-TRUNCATE TABLE employee_availability RESTART IDENTITY;
-TRUNCATE TABLE employee_zone_proficiency RESTART IDENTITY;
+-- CSV ルート（リポ内を参照）
+\set csvdir 'db/init/csv'
 
-\copy employee(employee_code,name,employment_type,position,default_work_hours,paid_leave_remaining,is_certifier,is_active)
-  FROM 'db/init/csv/employees.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+-- Zone の既定ステータス（CSVが空のときに使う。必要に応じて変更可）
+\set default_zone_status '通配'
 
-\copy job_type(job_type_code,job_type_name,category,for_fulltime_only,default_start_time,default_end_time,is_active)
-  FROM 'db/init/csv/jobtypes.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+-- MailVolume を入れる office_code（必要なコードに合わせて）
+\set office_code 'HQ'
 
-\copy zone(zone_code,zone_name,is_active)
-  FROM 'db/init/csv/zones.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+-- Holiday CSV（事前生成したもの）
+\set holiday_csv 'holidays_jp_2020_2050.csv'
 
-\copy demand_profile(zone_code,demand_mon,demand_tue,demand_wed,demand_thu,demand_fri,demand_sat,demand_sun,demand_holiday)
-  FROM 'db/init/csv/demand_profiles.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+-- （オプション）完全ワイプしたい場合だけ -v wipe=1 を付けて実行
+\if :{?wipe}
+TRUNCATE TABLE
+  employeeavailability,
+  employeezoneproficiency,
+  demandprofile,
+  zone,
+  employee,
+  jobtype,
+  mailvolume,
+  "Holiday"
+RESTART IDENTITY CASCADE;
+\endif
 
-\copy employee_availability(employee_code,work_date,available_from,available_to,shift_type,available)
-  FROM 'db/init/csv/employee_availabilities.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+-- 本番と同じローダーを呼び出す（ステージング→UPSERT なので外部キーも安全）
+\i db/init/20_load_csv.sql
 
-\copy employee_zone_proficiency(employee_code,zone_code,proficiency_level)
-  FROM 'db/init/csv/employee_zone_proficiencies.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+-- 統計更新（読み性能の安定化）
+ANALYZE jobtype, zone, demandprofile, mailvolume,
+        employee, employeezoneproficiency, employeeavailability, "Holiday";

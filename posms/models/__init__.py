@@ -69,3 +69,9 @@ def __dir__() -> list[str]:  # pragma: no cover
 if TYPE_CHECKING:  # pragma: no cover
     from .trainer import ModelTrainer  # noqa: F401
     from .predictor import ModelPredictor  # noqa: F401
+    try:
+        from .tuner import tune_xgb_optuna
+    except Exception:
+        tune_xgb_optuna = None  # type: ignore
+
+    __all__ = ["ModelTrainer", "ModelPredictor", "tune_xgb_optuna"]

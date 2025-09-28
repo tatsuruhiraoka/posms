@@ -33,11 +33,14 @@ import pandas as pd
 import jpholiday
 import typer
 from sqlalchemy import create_engine, inspect, text
-from typing_extensions import Annotated
+from typing import Annotated
 
 from posms.features import builder as FB
 from posms.features.builder import FEATURE_COLUMNS, FeatureBuilder
-from posms.flows.monthly_flow import monthly_refresh
+try:
+    from posms.flows.monthly_flow import monthly_refresh as _monthly
+except ImportError:
+    from posms.flows.monthly_flow import monthly_train as _monthly
 from posms.models import ModelPredictor
 from posms.models.trainer import ModelTrainer
 from posms.optimization.shift_builder import OutputType, ShiftBuilder
@@ -125,7 +128,7 @@ def run_monthly(
         "output_type": output_type.value,
         "excel_template": str(excel_template),
     }
-    monthly_refresh(**params)  # Prefect Flow をローカル関数として実行
+    _monthly(**params)  # Prefect Flow/関数を実行（refresh or train）
 
 
 @app.command("train")
@@ -157,7 +160,27 @@ def forecast_4weeks(
     fb = FeatureBuilder(office_id=office_id)
     eng = fb.engine
     MV = _resolve_mailvolume_table(eng)
-    office_id = fb.office_id  # 自動解決されたID
+    if office_id is None:
+        try:
+            # FeatureBuilder が中で解決してくれていれば使う
+            if getattr(fb, "office_id", None) is not None:
+                office_id = int(fb.office_id)
+            else:
+                from sqlalchemy import text as _t
+                with eng.begin() as con:
+                    rows = con.execute(_t(f"SELECT DISTINCT office_id FROM {MV} ORDER BY office_id")).fetchall()
+                if len(rows) == 1:
+                    office_id = int(rows[0][0])
+                elif len(rows) == 0:
+                    typer.secho("MailVolume にレコードがありません。先に学習用データを投入してください。", err=True)
+                    raise typer.Exit(code=1)
+                else:
+                    ids = ", ".join(str(r[0]) for r in rows)
+                    typer.secho(f"複数の office_id が見つかりました: [{ids}]  --office-id を指定してください。", err=True)
+                    raise typer.Exit(code=2)
+        except Exception as e:
+            typer.secho(f"office_id 自動解決に失敗: {e}", err=True)
+            raise typer.Exit(code=3)
 
     # 期間の行が無ければ作る（actual=NULL, forecast=NULL, price_increase_flagは既存値/無ければ0）
     start_ts = pd.to_datetime(start).normalize()
@@ -171,7 +194,14 @@ def forecast_4weeks(
             parse_dates=["date"],
         ).set_index("date")
         for dt in targets:
-            flag = int(df_flags["price_increase_flag"].get(dt, 0)) if not df_flags.empty else 0
+            val = df_flags["price_increase_flag"].get(dt) if not df_flags.empty else None
+            if isinstance(val, (bool, np.bool_)):
+            	flag = bool(val)
+            elif val is None or (isinstance(val, float) and np.isnan(val)):  # 欠損など
+                flag = False
+            else:
+            	# 0/1 や '0'/'1' が来ても安全に解釈
+            	flag = bool(int(val))
             con.execute(
                 text(
                     f'INSERT INTO {MV} ("date", office_id, actual_volume, forecast_volume, price_increase_flag) '
@@ -218,7 +248,9 @@ def forecast_4weeks(
             ]
         )[FEATURE_COLUMNS]
 
-        yhat = float(predictor.predict(X_row)[0])
+        yhat_raw = float(predictor.predict(X_row)[0])
+        # 負の予測は 0 にクリップ（count系のため）
+        yhat = max(0.0, yhat_raw)
         vol.loc[ts] = yhat  # 次日の特徴量計算のために予測値を採用
         updates.append((ts.date(), int(round(yhat))))
 

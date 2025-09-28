@@ -1,26 +1,31 @@
 # syntax=docker/dockerfile:1.6
-FROM python:3.11-slim AS builder
-ENV POETRY_VERSION=1.8.3 \
-    POETRY_VIRTUALENVS_CREATE=false \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+FROM python:3.11-slim
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_PREFER_BINARY=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir "poetry==$POETRY_VERSION"
-WORKDIR /app
-COPY pyproject.toml poetry.lock ./
-RUN test -f poetry.lock || (echo "ERROR: poetry.lock がありません" && exit 1)
-RUN --mount=type=cache,target=/root/.cache/pypoetry \
-    poetry export -f requirements.txt --without-hashes -o requirements.txt
 
-FROM python:3.11-slim AS runtime
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_PREFER_BINARY=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libpq5 && rm -rf /var/lib/apt/lists/*
+# ランタイムに必要なOS依存（xgboost/scikitのOpenMP, psycopg2ランタイム, お好みでcurl）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libgomp1 libpq5 curl && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
-COPY --from=builder /app/requirements.txt /app/requirements.txt
+
+# 依存のキャッシュを効かせるため、まずメタデータだけコピー
+COPY pyproject.toml README.md LICENSE /app/
+
+# 依存を導入（開発中は -e . へ続けて切り替える）
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir -r requirements.txt
-COPY . /app
-# CMD は docker-compose 側で指定済みなら省略可
-# CMD ["python","posms/flows/monthly_flow.py"]
+    pip install --no-cache-dir .
+
+# ソースを後段でコピー（ここから先がよく変わる）
+COPY posms /app/posms
+
+# 開発向け：編集即反映（本番はこの行を削除して通常インストールのみでOK）
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir -e .
+
+# CMD は compose 側で上書きする想定。とりあえずヘルプ表示
+CMD ["posms", "--help"]
