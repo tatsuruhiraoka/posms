@@ -81,3 +81,7 @@ docker-compose.override.yml
 Thumbs.db
 ehthumbs.db
 ._*
+# Local venv (safety)
+.venv/
+# Office temporary files
+~$*
