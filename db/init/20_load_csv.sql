@@ -9,7 +9,7 @@
 \if :{?default_zone_status} \else \set default_zone_status '通配' \endif
 ------------------------------------------------------------
 -- 1) JobType  (jobtypes.csv)
---   job_code,classification,job_name,start_time,end_time,work_hours,crosses_midnight
+--   job_code,classification,job_name,start_time,end_time,work_hours
 ------------------------------------------------------------
 DROP TABLE IF EXISTS stage_jobtype;
 CREATE TEMP TABLE stage_jobtype (
@@ -18,8 +18,7 @@ CREATE TEMP TABLE stage_jobtype (
   job_name          text,
   start_time        time,
   end_time          time,
-  work_hours        int,
-  crosses_midnight  boolean
+  work_hours        int
 );
 
 COPY stage_jobtype
@@ -27,8 +26,8 @@ FROM '/docker-entrypoint-initdb.d/csv/jobtypes.csv'
 WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
 
 BEGIN;
-INSERT INTO JobType (job_code, classification, job_name, start_time, end_time, work_hours, crosses_midnight, updated_at)
-SELECT job_code, classification, job_name, start_time, end_time, work_hours, COALESCE(crosses_midnight, FALSE), NOW()
+INSERT INTO JobType (job_code, classification, job_name, start_time, end_time, work_hours, updated_at)
+SELECT job_code, classification, job_name, start_time, end_time, work_hours, NOW()
 FROM stage_jobtype
 ON CONFLICT (job_code) DO UPDATE
 SET classification    = EXCLUDED.classification,
@@ -36,7 +35,6 @@ SET classification    = EXCLUDED.classification,
     start_time       = EXCLUDED.start_time,
     end_time         = EXCLUDED.end_time,
     work_hours       = EXCLUDED.work_hours,
-    crosses_midnight = EXCLUDED.crosses_midnight,
     updated_at       = NOW();
 COMMIT;
 
@@ -50,31 +48,26 @@ CREATE TEMP TABLE stage_zone (
   team_name          text,
   zone_name          text,
   operational_status text,
-  is_active          boolean
+  shift_type         text
 );
 
--- 推奨：固定パスの代わりに csvdir を使う
-COPY stage_zone(department_code, team_name, zone_name, operational_status, is_active)
+COPY stage_zone (department_code, team_name, zone_name, operational_status, shift_type)
 FROM '/docker-entrypoint-initdb.d/csv/zones.csv'
 WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
 
 BEGIN;
-INSERT INTO Zone (team_id, zone_name, operational_status, is_active, updated_at)
+INSERT INTO zone (team_id, zone_name, operational_status, is_active, shift_type, updated_at)
 SELECT
   t.team_id,
   s.zone_name,
-  COALESCE(NULLIF(btrim(s.operational_status), ''), :'default_zone_status'),
-  COALESCE(s.is_active, TRUE),
+  COALESCE(NULLIF(btrim(s.operational_status), ''), '通配'),
+  TRUE,  -- 初期投入は有効化
+  COALESCE(NULLIF(btrim(s.shift_type), ''), '日勤'),
   NOW()
 FROM stage_zone s
-JOIN Department d ON d.department_code = s.department_code
-JOIN Team       t ON t.department_id   = d.department_id
-                 AND t.team_name       = s.team_name
-ON CONFLICT ON CONSTRAINT zone_unique_per_team
-DO UPDATE SET
-  operational_status = COALESCE(NULLIF(btrim(EXCLUDED.operational_status), ''), Zone.operational_status),
-  is_active          = COALESCE(EXCLUDED.is_active, Zone.is_active),
-  updated_at         = NOW();
+JOIN department d ON d.department_code = s.department_code
+JOIN team       t ON t.department_id   = d.department_id
+                 AND t.team_name       = s.team_name;
 COMMIT;
 
 
