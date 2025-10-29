@@ -40,6 +40,7 @@ CREATE TABLE Zone (
   team_id            INT          NOT NULL REFERENCES Team(team_id),
   zone_name          VARCHAR(100) NOT NULL,
   operational_status VARCHAR(50)  NOT NULL,
+  shift_type VARCHAR(20) NOT NULL DEFAULT '日勤',
   zone_code          VARCHAR(20)  UNIQUE,
   created_at         TIMESTAMP    DEFAULT NOW(),
   updated_at         TIMESTAMP    DEFAULT NOW(),
@@ -58,7 +59,6 @@ CREATE TABLE JobType (
   start_time    TIME      NOT NULL,
   end_time      TIME      NOT NULL,
   work_hours    INT       NOT NULL,
-  crosses_midnight BOOLEAN     NOT NULL DEFAULT FALSE,-- 深夜勤(翌日跨ぎ)かどうか
   created_at    TIMESTAMP DEFAULT NOW(),
   updated_at    TIMESTAMP DEFAULT NOW()
 );
@@ -84,19 +84,28 @@ CREATE TABLE SpecialAttendanceType (
 );
 
 -- 2. 基本エンティティ
-CREATE TABLE Employee (
+CREATE TABLE employee (
   employee_id           SERIAL       PRIMARY KEY,
-  employee_code         VARCHAR(40)  NOT NULL UNIQUE,   -- ★ 追加：自然キー
+  employee_code         VARCHAR(40)  NOT NULL UNIQUE,   -- 自然キー
   name                  VARCHAR(100) NOT NULL,
   employment_type       VARCHAR(10)  NOT NULL,
   position              VARCHAR(50),
   /* 所定時間 */
   default_work_hours    SMALLINT     NOT NULL CHECK (default_work_hours BETWEEN 1 AND 24),
   monthly_work_hours    SMALLINT     NOT NULL CHECK (monthly_work_hours BETWEEN 1 AND 300),
-  team_id               INT          NOT NULL REFERENCES Team(team_id),
-  is_certifier          BOOLEAN      NOT NULL DEFAULT FALSE, -- 認証司
+
+  team_id               INT          NOT NULL REFERENCES team(team_id),
+
+  is_leader             BOOLEAN      NOT NULL DEFAULT FALSE,   -- 班長
+  is_vice_leader        BOOLEAN      NOT NULL DEFAULT FALSE,   -- 副班長
+  is_certifier          BOOLEAN      NOT NULL DEFAULT FALSE,   -- 認証司
+
   created_at            TIMESTAMP    DEFAULT NOW(),
-  updated_at            TIMESTAMP    DEFAULT NOW()
+  updated_at            TIMESTAMP    DEFAULT NOW(),
+
+  -- 同一人が班長かつ副班長にならない
+  CONSTRAINT chk_leader_flags_exclusive
+    CHECK (NOT (is_leader AND is_vice_leader))
 );
 
 
