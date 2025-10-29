@@ -6,8 +6,6 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
-dist/
 .eggs/
 *.egg-info/
 wheels/
@@ -76,6 +74,10 @@ docker-compose.override.yml
 .ruff_cache/
 .pytype/
 
+# App logs
+app_last.log
+posms.log
+*.log
 
 # OS ごみ
 Thumbs.db
