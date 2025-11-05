@@ -42,9 +42,9 @@ def write_dataframe_to_excel(
             wb.remove(default_sheet)
 
     # 既存シートがあれば一度削除（常にクリーンに出す）
-    #if sheet_name in wb.sheetnames:
-        #ws_existing = wb[sheet_name]
-        #wb.remove(ws_existing)
+    if sheet_name in wb.sheetnames:
+        ws_existing = wb[sheet_name]
+        wb.remove(ws_existing)
 
     ws = wb.create_sheet(title=sheet_name)
 

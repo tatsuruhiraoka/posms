@@ -9,6 +9,8 @@ SQLAlchemy の **Engine／Session** を一元管理するヘルパー。
 ----
 - 依存は **環境変数のみ**（`.env` には依存しません）。ゼロ設定の思想に合わせています。
 - 接続情報は **`DATABASE_URL` を最優先**し、無ければ `POSTGRES_*`（旧 `DB_*`）から自動組み立て。
+- さらに、ローカルの PostgreSQL（localhost:5432）が起動していれば自動検出して使用し、
+  それも無い場合は **SQLite**（`excel_templates/posms_demo.db`）へフォールバック。
 - 生成した **Engine はプロセス内で再利用**（擬似シングルトン）され、無駄な接続を抑えます。
 - `SessionManager().session_scope()` の **with コンテキスト**で自動 commit / rollback / close。
 
@@ -36,6 +38,8 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
+from pathlib import Path
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -55,7 +59,7 @@ class SessionManager:
     _session_factory: sessionmaker | None = None
 
     def __init__(self) -> None:
-        # 現状は環境変数のみを前提とする（.env 非依存）
+        # 環境変数ベース（.env 非依存）
         pass
 
     # ------------------------------------------------------------
@@ -109,37 +113,46 @@ class SessionManager:
     @staticmethod
     def _build_connection_url() -> str | URL:
         """
-        環境変数から Postgres 接続 URL を作成。
+        DB 接続 URL を自動決定（誤検出を避ける安全設計）。
 
         優先順位:
-        1) `DATABASE_URL`（例: postgresql+psycopg2://user:pass@host:5432/db）
-        2) `POSTGRES_*` / 旧 `DB_*` を `URL.create` で組み立て
+          1) 明示 `DATABASE_URL`
+          2) 明示 `POSTGRES_*` / 旧 `DB_*` で組み立て（HOST が **明示されている時だけ**）
+          3) Docker コンテナ **内**なら `db:5432` を使う
+          4) それ以外は SQLite（excel_templates/posms_demo.db）
         """
+        import os
+        from pathlib import Path
+
+        # 1) 明示 URL 最優先
         database_url = os.getenv("DATABASE_URL")
         if database_url:
             return database_url
 
+        # 2) POSTGRES_* が **揃っていて HOST も明示**されている時だけ採用
         user = os.getenv("POSTGRES_USER") or os.getenv("DB_USER")
-        pwd = os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD")
-        host = os.getenv("POSTGRES_HOST", "localhost")
-        port = os.getenv("POSTGRES_PORT", "5432")
-        db = os.getenv("POSTGRES_DB") or os.getenv("DB_NAME")
-
-        if not all([user, pwd, db]):
-            raise RuntimeError(
-                "DB connection info is incomplete (set env vars: DATABASE_URL or POSTGRES_*)"
+        pwd  = os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD")
+        host = os.getenv("POSTGRES_HOST")                 # 既定は付けない（誤って localhost にならないように）
+        port = os.getenv("POSTGRES_PORT") or "5432"
+        db   = os.getenv("POSTGRES_DB") or os.getenv("DB_NAME")
+        if all([user, pwd, db, host]):
+            return URL.create(
+                "postgresql+psycopg2",
+                username=user, password=pwd,
+                host=host, port=int(port), database=db,
             )
 
-        # URL.create で安全に組み立て（パスワード中の記号にも強い）
-        return URL.create(
-            "postgresql+psycopg2",
-            username=user,
-            password=pwd,
-            host=host,
-            port=int(port) if port else None,
-            database=db,
-        )
+        # 3) Docker コンテナ内なら、compose のサービス名で接続
+        #    （/ .dockerenv が存在するのはコンテナ内のみ）
+        try:
+            if Path("/.dockerenv").exists():
+                return "postgresql+psycopg2://posms:posms@db:5432/posms"
+        except Exception:
+            pass
 
+        # 4) フォールバックは SQLite（配布/Excelモード）
+        demo_path = Path(__file__).resolve().parents[2] / "excel_templates" / "posms_demo.db"
+        return f"sqlite:///{demo_path}"
 
 # ---------------- Quick self-test ----------------
 if __name__ == "__main__":
