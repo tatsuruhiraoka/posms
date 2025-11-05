@@ -32,11 +32,10 @@ import numpy as np
 import pandas as pd
 import jpholiday
 import typer
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import inspect, text
 from typing import Annotated, Optional
-from .db import _make_engine_from_env  # 既存ヘルパを想定
 from .exporters.excel_exporter import write_dataframe_to_excel
-
+from posms.utils.db import SessionManager
 from posms.features import builder as FB
 from posms.features.builder import FEATURE_COLUMNS, FeatureBuilder
 try:
@@ -64,27 +63,32 @@ except Exception:
 def _default_template() -> Path:
     return Path("excel_templates/shift_template.xlsx")
 
+def _engine():
+    """SessionManager 経由で Engine を取得（Postgres⇄SQLite 自動切替）"""
+    return SessionManager().engine
 
-def _make_engine_from_env():
-    """DATABASE_URL または POSTGRES_* から DB 接続（ゼロ設定）"""
-    db_url = os.getenv("DATABASE_URL")
-    if db_url:
-        return create_engine(db_url, future=True, pool_pre_ping=True)
+#def _engine():
+#    """DATABASE_URL または POSTGRES_* から DB 接続（ゼロ設定）"""
+#    db_url = os.getenv("DATABASE_URL")
+#    if db_url:
+#        return create_engine(db_url, future=True, pool_pre_ping=True)
+#
+#    user = os.getenv("POSTGRES_USER") or os.getenv("DB_USER")
+#    pwd = os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD")
+#    host = os.getenv("POSTGRES_HOST", "localhost")
+#    port = os.getenv("POSTGRES_PORT", "5432")
+#    name = os.getenv("POSTGRES_DB") or os.getenv("DB_NAME")
+#    if not all([user, pwd, name]):
+#        raise RuntimeError("DB接続情報が不足：DATABASE_URL または POSTGRES_* を設定してください")
+#    return create_engine(
+#        f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{name}",
+#        future=True,
+#        pool_pre_ping=True,
+#    )
 
-    user = os.getenv("POSTGRES_USER") or os.getenv("DB_USER")
-    pwd = os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD")
-    host = os.getenv("POSTGRES_HOST", "localhost")
-    port = os.getenv("POSTGRES_PORT", "5432")
-    name = os.getenv("POSTGRES_DB") or os.getenv("DB_NAME")
-    if not all([user, pwd, name]):
-        raise RuntimeError("DB接続情報が不足：DATABASE_URL または POSTGRES_* を設定してください")
-    return create_engine(
-        f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{name}",
-        future=True,
-        pool_pre_ping=True,
-    )
-
-
+def _engine():
+    return SessionManager().engine
+    
 def _resolve_mailvolume_table(eng) -> str:
     insp = inspect(eng)
     existing = {t.lower() for t in insp.get_table_names(schema="public")}
@@ -343,7 +347,7 @@ def export_excel(
                 k, v = kv.split("=", 1)
                 header_map_dict[k.strip()] = v.strip()
 
-    engine = _make_engine_from_env()  # DATABASE_URL から接続
+    engine = _engine()  # DATABASE_URL から接続
     with engine.connect() as conn:
         df = pd.read_sql(text(sql), conn)
         
@@ -375,105 +379,344 @@ def export_excel(
     )
     typer.echo(f"✅ Exported: {out}")
 
-@app.command("export-employee-demand")
-def export_employee_demand(
-    team: Annotated[str, typer.Option("--team", "-t", help="例: 1班")],
-    out: Annotated[Path, typer.Option("--out", help="出力 .xlsx")] = Path("excel_templates/班データ.xlsx"),
-    template: Annotated[Optional[Path], typer.Option("--template", help="テンプレ .xlsx")] = Path("excel/excel_templates/shift_template.xlsx"),
+@app.command("export-sheet-employees")
+def export_sheet_employees(
+    department_code: str = typer.Option(..., "--department-code", "-dc", help="例: DPT-A もしくは 部署名"),
+    team: str = typer.Option(..., "--team", "-t", help="例: 1班"),
+    out: Path = typer.Option(Path("excel_out/班データ.xlsx"), "--out"),
+    sheet: str = typer.Option("社員", "--sheet"),
+    template: Path = typer.Option(None, "--template"),
 ):
-    """社員別需要：
-    列= 社員番号, 氏名, <区名を横展開>, 月, 火, 水, 木, 金, 土, 日, 祝
-    値= 区列: EmployeeZoneProficiency.proficiency（無い所は0） / 曜日列: EmployeeAvailability
-    """
-    eng = _make_engine_from_env()
+    eng = _engine()
 
-    # --- 1) SQL を必ず先に“3つとも”定義 ---
+    # department_code カラムの有無で WHERE を切り替え
+    insp = inspect(eng)
+    dept_cols = {c["name"] if isinstance(c, dict) else c.name for c in insp.get_columns("department")}
+    has_code = "department_code" in dept_cols
+
+    # Postgres / SQLite 共通SQL（DB依存の ORDER BY は付けない）
+    base_sql = """
+      SELECT
+          e.employee_code   AS "社員番号",
+          e.name            AS "氏名",
+          d.department_name AS "部",
+          t.team_name       AS "班",
+          COALESCE(e.employment_type,'')  AS "社員タイプ",
+          COALESCE(e.position,'')         AS "役職",
+          CASE WHEN COALESCE(e.is_leader,0)      <> 0 THEN 1 ELSE 0 END AS "班長",
+          CASE WHEN COALESCE(e.is_vice_leader,0) <> 0 THEN 1 ELSE 0 END AS "副班長",
+          CASE WHEN COALESCE(e.is_certifier,0)   <> 0 THEN 1 ELSE 0 END AS "認証司",
+          COALESCE(e.default_work_hours,0)  AS "勤務時間(日)",
+          COALESCE(e.monthly_work_hours,0)  AS "勤務時間(月)"
+      FROM employee e
+      JOIN team t ON t.team_id = e.team_id
+      JOIN department d ON d.department_id = t.department_id
+      WHERE {where_clause}
+    """
+
+    if has_code:
+        where_clause = "(COALESCE(d.department_code,'') = :dc OR d.department_name = :dc) AND t.team_name = :tn"
+    else:
+        where_clause = "d.department_name = :dc AND t.team_name = :tn"
+
+    sql = base_sql.format(where_clause=where_clause)
+
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con, params={"dc": department_code, "tn": team})
+
+    # 自然順ソート：社員番号の数字部分で並び替え（DB依存を避ける）
+    if "社員番号" in df.columns:
+        df["__num__"] = (
+            df["社員番号"]
+            .astype(str)
+            .str.extract(r"(\d+)", expand=False)
+            .fillna("999999999")
+            .astype(int)
+        )
+        df = df.sort_values(["__num__", "社員番号"]).drop(columns="__num__")
+
+    # 0/1 列は int に統一（見栄え＆型ブレ防止）
+    for c in ["班長", "副班長", "認証司", "勤務時間(日)", "勤務時間(月)"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+
+    # 出力
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(
+        df=df,
+        out_path=out,
+        sheet_name=sheet,
+        template_path=template,
+        start_cell="A1",
+        append=bool(template),
+    )
+    typer.echo(f"✅ 社員シート {len(df)}行 → {out}（{sheet}）")
+
+@app.command("export-sheet-zones")
+def export_sheet_zones(
+    department_code: str = typer.Option(..., "--department-code", "-dc"),
+    team: str = typer.Option(..., "--team", "-t"),
+    out: Path = typer.Option(Path("excel_out/班データ.xlsx"), "--out"),
+    sheet: str = typer.Option("区情報", "--sheet"),
+    template: Path = typer.Option(None, "--template"),
+):
+    eng = _engine()
+
+    insp = inspect(eng)
+    dept_cols = {c["name"] if isinstance(c, dict) else c.name for c in insp.get_columns("department")}
+    has_code = "department_code" in dept_cols
+
+    base_sql = """
+      SELECT
+        CAST(COALESCE(z.zone_code, 'Z' || z.zone_id) AS TEXT) AS "区コード",
+        COALESCE(z.zone_name,'')     AS "区名",
+        t.team_name                  AS "班",
+        COALESCE(z.operational_status,'通配') AS "稼働",
+        COALESCE(dem.demand_mon,0)     AS "月",
+        COALESCE(dem.demand_tue,0)     AS "火",
+        COALESCE(dem.demand_wed,0)     AS "水",
+        COALESCE(dem.demand_thu,0)     AS "木",
+        COALESCE(dem.demand_fri,0)     AS "金",
+        COALESCE(dem.demand_sat,0)     AS "土",
+        COALESCE(dem.demand_sun,0)     AS "日",
+        COALESCE(dem.demand_holiday,0) AS "祝"
+      FROM zone z
+      JOIN team t          ON t.team_id = z.team_id
+      JOIN department d    ON d.department_id = t.department_id
+      LEFT JOIN demandprofile dem ON dem.zone_id = z.zone_id
+      WHERE {where_clause}
+      ORDER BY COALESCE(z.zone_code, 'Z' || z.zone_id)
+    """
+
+    if has_code:
+        where_clause = "(COALESCE(d.department_code,'') = :dc OR d.department_name = :dc) AND t.team_name = :tn"
+    else:
+        where_clause = "d.department_name = :dc AND t.team_name = :tn"
+
+    sql = base_sql.format(where_clause=where_clause)
+
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con, params={"dc": department_code, "tn": team})
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(df, out, sheet_name=sheet, template_path=template,
+                             start_cell="A1", append=bool(template))
+    typer.echo(f"✅ 区情報シート {len(df)}行 → {out}（{sheet}）")
+
+@app.command("export-sheet-employee-demand")
+def export_sheet_employee_demand(
+    team: str = typer.Option(..., "--team", "-t", help="例: 1班"),
+    out: Path = typer.Option(Path("excel_out/班データ.xlsx"), "--out"),
+    template: Path = typer.Option(None, "--template", help="xls/xlsx/xlsm（xlsmはマクロ温存）"),
+    sheet: str = typer.Option("社員別需要", "--sheet"),
+):
+    """
+    班ごとの『社員別需要』シートをExcelに出力:
+      列 = 社員番号, 氏名, <区名...横展開>, 月, 火, 水, 木, 金, 土, 日, 祝
+      値 = 区列: EmployeeZoneProficiency.proficiency（無い所は0） / 曜日列: 1/0
+    """
+    eng = _engine()
+
+    # 1) 班の区一覧（Postgres/SQLite 共通）
     sql_zones = """
       SELECT z.zone_id, z.zone_code, z.zone_name
-        FROM zone z JOIN team t ON z.team_id=t.team_id
+        FROM zone z
+        JOIN team t ON z.team_id = t.team_id
        WHERE t.team_name = :team
-       ORDER BY z.zone_code
+       ORDER BY COALESCE(z.zone_code, 'Z' || z.zone_id)
     """
+
+    # 2) 社員＋曜日可否（0/1 前提・DB共通 / 並びは後で pandas で自然順に）
     sql_emp = """
       SELECT e.employee_id, e.employee_code, e.name,
-         COALESCE(ea.available_mon,false) AS mon,
-         COALESCE(ea.available_tue,false) AS tue,
-         COALESCE(ea.available_wed,false) AS wed,
-         COALESCE(ea.available_thu,false) AS thu,
-         COALESCE(ea.available_fri,false) AS fri,
-         COALESCE(ea.available_sat,false) AS sat,
-         COALESCE(ea.available_sun,false) AS sun,
-         COALESCE(ea.available_hol,false) AS hol
-         FROM employee e
-         JOIN team t ON e.team_id=t.team_id
-         LEFT JOIN employeeavailability ea ON ea.employee_id=e.employee_id
-        WHERE t.team_name = :team
-        ORDER BY (regexp_replace(e.employee_code::text, '\D', '', 'g'))::int, e.employee_code
+             CASE WHEN COALESCE(ea.available_mon,  1) <> 0 THEN 1 ELSE 0 END AS mon,
+             CASE WHEN COALESCE(ea.available_tue,  1) <> 0 THEN 1 ELSE 0 END AS tue,
+             CASE WHEN COALESCE(ea.available_wed,  1) <> 0 THEN 1 ELSE 0 END AS wed,
+             CASE WHEN COALESCE(ea.available_thu,  1) <> 0 THEN 1 ELSE 0 END AS thu,
+             CASE WHEN COALESCE(ea.available_fri,  1) <> 0 THEN 1 ELSE 0 END AS fri,
+             CASE WHEN COALESCE(ea.available_sat,  0) <> 0 THEN 1 ELSE 0 END AS sat,
+             CASE WHEN COALESCE(ea.available_sun,  0) <> 0 THEN 1 ELSE 0 END AS sun,
+             CASE WHEN COALESCE(ea.available_hol,  0) <> 0 THEN 1 ELSE 0 END AS hol
+        FROM employee e
+        JOIN team t ON e.team_id = t.team_id
+   LEFT JOIN employeeavailability ea ON ea.employee_id = e.employee_id
+       WHERE t.team_name = :team
     """
-    # zone_name は後で df_z から付与する（zone_codeだけでOK）
+
+    # 3) 熟練度（社員×区）も共通
     sql_prof = """
-      SELECT ezp.employee_id, z.zone_code, COALESCE(ezp.proficiency,0) AS proficiency
+      SELECT ezp.employee_id, z.zone_name, COALESCE(ezp.proficiency, 0) AS proficiency
         FROM employeezoneproficiency ezp
-        JOIN zone z ON ezp.zone_id = z.zone_id
+        JOIN zone z ON z.zone_id = ezp.zone_id
         JOIN team t ON z.team_id = t.team_id
        WHERE t.team_name = :team
     """
 
-    # --- 2) 読み込み ---
+    from sqlalchemy import text
+    import pandas as pd
+
     with eng.connect() as con:
         df_z = pd.read_sql(text(sql_zones), con, params={"team": team})
         df_e = pd.read_sql(text(sql_emp),   con, params={"team": team})
         df_p = pd.read_sql(text(sql_prof),  con, params={"team": team})
 
-    # 列名を小文字化（大小混在対策）
+    # 列名小文字化
     for df in (df_z, df_e, df_p):
         df.columns = [c.lower() for c in df.columns]
 
-    # --- 3) zone_name を df_p に付与（いま df_p は zone_code だけ）---
-    if "zone_name" not in df_p.columns:
-        df_p = df_p.merge(df_z[["zone_code", "zone_name"]], on="zone_code", how="left")
+    # 社員コードの“自然順”は常に pandas 側で（DB依存の正規表現等を使わない）
+    if "employee_code" in df_e.columns:
+        df_e["__num__"] = (
+            df_e["employee_code"]
+            .astype(str)
+            .str.extract(r"(\d+)", expand=False)   # 数字を抽出
+            .fillna("999999999")
+            .astype(int)
+        )
+        df_e = df_e.sort_values(["__num__", "employee_code"]).drop(columns="__num__")
 
-    # --- 4) 区の横展開（pivot） ---
+    # 区名の並び（空でも列は用意）
+    zone_cols = df_z["zone_name"].dropna().astype(str).tolist()
+
+    # 熟練度を横展開
     if df_p.empty:
-        zcols = list(df_z["zone_name"])
-        wide = pd.DataFrame(columns=["employee_id"] + zcols)
+        wide = pd.DataFrame(columns=["employee_id"] + zone_cols)
     else:
         wide = (
-            df_p.pivot_table(
-                index="employee_id",
-                columns="zone_name",     # 区名で横展開
-                values="proficiency",
-                fill_value=0,
-                aggfunc="max",
-            )
+            df_p.pivot_table(index="employee_id", columns="zone_name",
+                             values="proficiency", fill_value=0, aggfunc="max")
             .reset_index()
+            .rename_axis(None, axis=1)
         )
-        zcols = [c for c in wide.columns if c != "employee_id"]
 
-    # --- 5) 社員基本と結合 → 欠損0埋め → 列順を整える ---
+    # 結合 → 欠損0埋め
     df = df_e.merge(wide, on="employee_id", how="left")
-    for c in zcols:
-        df[c] = df[c].fillna(0).astype("int64")
+    for zc in zone_cols:
+        if zc not in df.columns:
+            df[zc] = 0
+        df[zc] = pd.to_numeric(df[zc], errors="coerce").fillna(0).astype("int64")
 
-    ordered = ["employee_code", "name"] + zcols + ["mon","tue","wed","thu","fri","sat","sun","hol"]
-    # 無い列があっても KeyError にならないよう存在列でフィルタ
-    ordered = [c for c in ordered if c in df.columns]
+    for c in ["mon","tue","wed","thu","fri","sat","sun","hol"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("int64")
+
+    # 列順と日本語見出し
+    ordered = ["employee_code", "name"] + zone_cols + ["mon","tue","wed","thu","fri","sat","sun","hol"]
+    ordered = [c for c in df.columns if c in ordered]  # 安全化
     df = df[ordered].rename(columns={
-        "employee_code":"社員番号", "name":"氏名",
-        "mon":"月","tue":"火","wed":"水","thu":"木","fri":"金","sat":"土","sun":"日","hol":"祝"
+        "employee_code":"社員番号","name":"氏名",
+        "mon":"月","tue":"火","wed":"水","thu":"木","fri":"金","sat":"土","sun":"日","hol":"祝",
     })
 
-    # --- 6) 書き出し（同名シートを作り直し、他シートは保持） ---
+    # 出力
+    out.parent.mkdir(parents=True, exist_ok=True)
     write_dataframe_to_excel(
         df=df,
         out_path=out,
-        sheet_name="社員別需要",
-        template_path=template if template else None,
-        header_map=None,
+        sheet_name=sheet,
+        template_path=template,
         start_cell="A1",
-        append=True,  # 既存ブックに追記/上書き
+        append=bool(template) or out.exists(),
     )
-    typer.echo(f"✅ 社員別需要 → {out}")
+    typer.echo(f"✅ 社員別需要シート {len(df)}行 → {out}（{sheet}）")
+
+@app.command("export-sheet-jobtypes-regular")
+def export_sheet_jobtypes_regular(
+    out: Path = typer.Option(Path("excel_out/班データ統合.xlsx"), "--out"),
+    template: Path = typer.Option(None, "--template"),
+    sheet: str = typer.Option("勤務種別(正社員)", "--sheet"),
+):
+    eng = _engine()
+    sql = """
+      SELECT job_name  AS "勤務名",
+             start_time AS "就労開始時間",
+             end_time   AS "就労終了時間",
+             work_hours AS "勤務時間"
+        FROM JobType
+       WHERE lower(COALESCE(classification,'')) IN ('reg','regular','fulltime','正社員')
+       ORDER BY start_time, job_name;
+    """
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(df, out, sheet_name=sheet, template_path=template,
+                             start_cell="A1", append=bool(template) or out.exists())
+    typer.echo(f"✅ 勤務種別(正社員) {len(df)}行 → {out}（{sheet}）")
+
+@app.command("export-sheet-jobtypes-fixedterm")
+def export_sheet_jobtypes_fixedterm(
+    out: Path = typer.Option(Path("excel_out/班データ統合.xlsx"), "--out"),
+    template: Path = typer.Option(None, "--template"),
+    sheet: str = typer.Option("勤務種別(期間雇用)", "--sheet"),
+):
+    eng = _engine()
+    sql = """
+      SELECT job_name  AS "勤務名",
+             start_time AS "就労開始時間",
+             end_time   AS "就労終了時間",
+             work_hours AS "勤務時間"
+        FROM JobType
+       WHERE lower(COALESCE(classification,'')) IN ('contract','part-time','pt','temp','dispatch','期間雇用社員')
+       ORDER BY start_time, job_name;
+    """
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(df, out, sheet_name=sheet, template_path=template,
+                             start_cell="A1", append=bool(template) or out.exists())
+    typer.echo(f"✅ 勤務種別(期間雇用) {len(df)}行 → {out}（{sheet}）")
+    
+@app.command("export-team-workbook")
+def export_team_workbook(
+    department_code: str = typer.Option(..., "--department-code", "-dc", help="例: DPT-A"),
+    team: str = typer.Option(..., "--team", "-t", help="班名（例: 1班）"),
+    out: Path = typer.Option(Path("excel_out/班統合データ.xlsx"), "--out", help="出力先 .xlsx"),
+    template: Path = typer.Option(
+        Path("excel_templates/shift_template.xlsm"),
+        "--template",
+        help="テンプレート（xlsmを指定すればマクロ保持）",
+    ),
+):
+    """
+    部署・班ごとの Excel ブックを統合出力。
+    シート構成：社員 / 区情報 / 社員別需要 / 正社員服務表 / 期間雇用社員服務表
+    """
+    typer.echo(f"▶ 班「{team}」の統合Excelを作成中...")
+
+    # 1️⃣ 社員シート（テンプレ適用）
+    export_sheet_employees(
+        department_code=department_code,
+        team=team,
+        out=out,
+        sheet="社員",
+        template=template,
+    )
+
+    # 2️⃣ 区情報（同じブックに追記）
+    export_sheet_zones(
+        department_code=department_code,
+        team=team,
+        out=out,
+        sheet="区情報",
+        template=out,  # 既存ブックに追記
+    )
+
+    # 3️⃣ 社員別需要
+    export_sheet_employee_demand(
+        team=team,
+        out=out,
+        template=out,  # 既存ブックに追記
+        sheet="社員別需要",
+    )
+
+    # 4️⃣ 正社員服務表
+    export_sheet_jobtypes_regular(out=out, template=out, sheet="正社員服務表")
+
+
+    # 5️⃣ 期間雇用社員服務表
+    export_sheet_jobtypes_fixedterm(out=out, template=out, sheet="期間雇用社員服務表")
+
+    typer.echo(f"✅ 統合完了: {out.resolve()}")
     
 @app.command("import-excel")
 def import_excel(
@@ -485,8 +728,7 @@ def import_excel(
     - B) 区情報: zone → demandprofile
     - A) 社員別需要: employeeavailability / employeezoneproficiency
     """
-    eng = _make_engine_from_env()
-
+    eng = _engine()
     # 一度だけオープンして使い回す
     xls = pd.ExcelFile(file)
 

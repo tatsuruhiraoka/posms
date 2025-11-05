@@ -1,82 +1,95 @@
 \set ON_ERROR_STOP on
 \timing on
 
--- ローカル（Compose自動実行/手動実行） … デフォルトで /docker-entrypoint-initdb.d/csv/*.csv を読む
---CI（GitHub Actions） … psql 実行時に -v csvdir='db/init/csv' を渡して、リポジトリ内の CSV を読む
+-- デフォルトのCSVルート（コンテナ内）。CI等で上書き可: -v csvdir='db/init/csv'
 \if :{?csvdir} \else \set csvdir '/docker-entrypoint-initdb.d/csv' \endif
 
--- ★ Zone の既定ステータス（未指定時）。実行時に -v で上書き可
+-- ★ zoneの既定ステータス（未指定時）
 \if :{?default_zone_status} \else \set default_zone_status '通配' \endif
+-- 祝日CSV名（未指定なら同梱のファイル名）
+\if :{?holiday_csv} \else \set holiday_csv 'holidays_jp_2020_2050.csv' \endif
+
+-- 各CSVのフルパスをpsql変数に格納（COPYは単一文字列しか受けないため）
+select
+  (:'csvdir' || '/jobtypes.csv')                      as jobtypes_file,
+  (:'csvdir' || '/zones.csv')                         as zones_file,
+  (:'csvdir' || '/demand_profiles.csv')               as demand_profiles_file,
+  (:'csvdir' || '/mail_volumes.csv')                  as mail_volumes_file,
+  (:'csvdir' || '/employees.csv')                     as employees_file,
+  (:'csvdir' || '/employee_zone_proficiencies.csv')   as ezp_file,
+  (:'csvdir' || '/employee_availabilities.csv')       as eavail_file,
+  (:'csvdir' || '/' || :'holiday_csv')                as holiday_file
+\gset
+
 ------------------------------------------------------------
--- 1) JobType  (jobtypes.csv)
---   job_code,classification,job_name,start_time,end_time,work_hours
+-- 1) jobtype  (jobtypes.csv)
+--   columns: classification,job_code,job_name,start_time,end_time,work_hours
 ------------------------------------------------------------
-DROP TABLE IF EXISTS stage_jobtype;
-CREATE TEMP TABLE stage_jobtype (
-  classification    text,
-  job_code          text,
-  job_name          text,
-  start_time        time,
-  end_time          time,
-  work_hours        int
+drop table if exists stage_jobtype;
+create temp table stage_jobtype (
+  classification text,
+  job_code       text,
+  job_name       text,
+  start_time     time,
+  end_time       time,
+  work_hours     int
 );
+copy stage_jobtype from :'jobtypes_file' with (format csv, header true, encoding 'UTF8');
 
-COPY stage_jobtype
-FROM '/docker-entrypoint-initdb.d/csv/jobtypes.csv'
-WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
-
-BEGIN;
-INSERT INTO JobType (job_code, classification, job_name, start_time, end_time, work_hours, updated_at)
-SELECT job_code, classification, job_name, start_time, end_time, work_hours, NOW()
-FROM stage_jobtype
-ON CONFLICT (job_code) DO UPDATE
-SET classification    = EXCLUDED.classification,
-    job_name         = EXCLUDED.job_name,
-    start_time       = EXCLUDED.start_time,
-    end_time         = EXCLUDED.end_time,
-    work_hours       = EXCLUDED.work_hours,
-    updated_at       = NOW();
-COMMIT;
+begin;
+insert into jobtype (job_code, classification, job_name, start_time, end_time, work_hours, updated_at)
+select job_code, classification, job_name, start_time, end_time, work_hours, now()
+from stage_jobtype
+on conflict (job_code) do update
+set  classification = excluded.classification
+   , job_name       = excluded.job_name
+   , start_time     = excluded.start_time
+   , end_time       = excluded.end_time
+   , work_hours     = excluded.work_hours
+   , updated_at     = now();
+commit;
 
 ------------------------------------------------------------
--- 2) Zone  (zones.csv)  ※ zone_code はCSVに載せない（DBが自動採番）
---   department_code,team_name,zone_name,operational_status,is_active
+-- 2) zone  (zones.csv)
+--   columns: department_code,team_name,zone_name,operational_status,shift_type
 ------------------------------------------------------------
-DROP TABLE IF EXISTS stage_zone;
-CREATE TEMP TABLE stage_zone (
+drop table if exists stage_zone;
+create temp table stage_zone (
   department_code    text,
   team_name          text,
   zone_name          text,
   operational_status text,
   shift_type         text
 );
+copy stage_zone from :'zones_file' with (format csv, header true, encoding 'UTF8');
 
-COPY stage_zone (department_code, team_name, zone_name, operational_status, shift_type)
-FROM '/docker-entrypoint-initdb.d/csv/zones.csv'
-WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
-
-BEGIN;
-INSERT INTO zone (team_id, zone_name, operational_status, is_active, shift_type, updated_at)
-SELECT
+begin;
+insert into zone (team_id, zone_name, operational_status, is_active, shift_type, updated_at)
+select
   t.team_id,
   s.zone_name,
-  COALESCE(NULLIF(btrim(s.operational_status), ''), '通配'),
-  TRUE,  -- 初期投入は有効化
-  COALESCE(NULLIF(btrim(s.shift_type), ''), '日勤'),
-  NOW()
-FROM stage_zone s
-JOIN department d ON d.department_code = s.department_code
-JOIN team       t ON t.department_id   = d.department_id
-                 AND t.team_name       = s.team_name;
-COMMIT;
-
+  coalesce(nullif(btrim(s.operational_status), ''), :'default_zone_status'),
+  1,
+  coalesce(nullif(btrim(s.shift_type), ''), '日勤'),
+  now()
+from stage_zone s
+join department d on d.department_code = s.department_code
+join team       t on t.department_id   = d.department_id
+                 and t.team_name       = s.team_name
+on conflict on constraint zone_unique_per_team
+do update set
+  operational_status = excluded.operational_status,
+  shift_type         = excluded.shift_type,
+  is_active          = 1,
+  updated_at         = now();
+commit;
 
 ------------------------------------------------------------
--- 3) DemandProfile  (demand_profiles.csv)  ※ zone_code 不要
---   department_code,team_name,zone_name,demand_mon,...,demand_holiday
+-- 3) demandprofile  (demand_profiles.csv)
+--   columns: department_code,team_name,zone_name,demand_mon,...,demand_holiday
 ------------------------------------------------------------
-DROP TABLE IF EXISTS stage_demand_profile;
-CREATE TEMP TABLE stage_demand_profile (
+drop table if exists stage_demand_profile;
+create temp table stage_demand_profile (
   department_code text,
   team_name       text,
   zone_name       text,
@@ -89,84 +102,84 @@ CREATE TEMP TABLE stage_demand_profile (
   demand_sun      int,
   demand_holiday  int
 );
+copy stage_demand_profile from :'demand_profiles_file' with (format csv, header true, encoding 'UTF8');
 
-COPY stage_demand_profile
-FROM '/docker-entrypoint-initdb.d/csv/demand_profiles.csv'
-WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
-
-BEGIN;
-WITH team_resolved AS (
-  SELECT s.*, d.department_id, t.team_id
-  FROM stage_demand_profile s
-  JOIN Department d ON d.department_code = s.department_code
-  JOIN Team       t ON t.department_id   = d.department_id AND t.team_name = s.team_name
+begin;
+with team_resolved as (
+  select s.*, d.department_id, t.team_id
+  from stage_demand_profile s
+  join department d on d.department_code = s.department_code
+  join team       t on t.department_id   = d.department_id
+                   and t.team_name       = s.team_name
 ),
-zone_resolved AS (
-  SELECT tr.*, z.zone_id
-  FROM team_resolved tr
-  JOIN Zone z ON z.team_id = tr.team_id AND z.zone_name = tr.zone_name
+zone_resolved as (
+  select tr.*, z.zone_id
+  from team_resolved tr
+  join zone z on z.team_id = tr.team_id and z.zone_name = tr.zone_name
 )
-INSERT INTO DemandProfile (zone_id, demand_mon, demand_tue, demand_wed, demand_thu,
-                           demand_fri, demand_sat, demand_sun, demand_holiday)
-SELECT zr.zone_id, zr.demand_mon, zr.demand_tue, zr.demand_wed, zr.demand_thu,
-       zr.demand_fri, zr.demand_sat, zr.demand_sun, zr.demand_holiday
-FROM zone_resolved zr
-ON CONFLICT (zone_id) DO UPDATE
-SET demand_mon      = EXCLUDED.demand_mon,
-    demand_tue      = EXCLUDED.demand_tue,
-    demand_wed      = EXCLUDED.demand_wed,
-    demand_thu      = EXCLUDED.demand_thu,
-    demand_fri      = EXCLUDED.demand_fri,
-    demand_sat      = EXCLUDED.demand_sat,
-    demand_sun      = EXCLUDED.demand_sun,
-    demand_holiday  = EXCLUDED.demand_holiday;
-COMMIT;
+insert into demandprofile
+  (zone_id, demand_mon, demand_tue, demand_wed, demand_thu, demand_fri, demand_sat, demand_sun, demand_holiday)
+select zr.zone_id, zr.demand_mon, zr.demand_tue, zr.demand_wed, zr.demand_thu, zr.demand_fri, zr.demand_sat, zr.demand_sun, zr.demand_holiday
+from zone_resolved zr
+on conflict (zone_id) do update
+set  demand_mon     = excluded.demand_mon
+   , demand_tue     = excluded.demand_tue
+   , demand_wed     = excluded.demand_wed
+   , demand_thu     = excluded.demand_thu
+   , demand_fri     = excluded.demand_fri
+   , demand_sat     = excluded.demand_sat
+   , demand_sun     = excluded.demand_sun
+   , demand_holiday = excluded.demand_holiday;
+commit;
 
 ------------------------------------------------------------
--- 4) MailVolume  (mail_volumes.csv)
---   CSV想定: date,actual_volume だけ
---   オフィスは -v office_code=... で指定。未指定なら 'HQ'
+-- 4) mailvolume  (mail_volumes.csv)
+--   columns: date,actual_volume
+--   office_code は -v office_code=... で上書き可（未指定は 'HQ'）
 ------------------------------------------------------------
 \if :{?office_code} \else \set office_code 'HQ' \endif
 
-DROP TABLE IF EXISTS stage_mail_volume;
-CREATE TEMP TABLE stage_mail_volume (
+drop table if exists stage_mail_volume;
+create temp table stage_mail_volume (
   date           date,
   actual_volume  int
 );
+copy stage_mail_volume (date, actual_volume) from :'mail_volumes_file' with (format csv, header true, encoding 'UTF8');
 
--- 2列だけを列リスト指定で読み込む
-COPY stage_mail_volume (date, actual_volume)
-FROM '/docker-entrypoint-initdb.d/csv/mail_volumes.csv'
-WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
-
-BEGIN;
-INSERT INTO MailVolume (date, office_id, actual_volume, forecast_volume, price_increase_flag)
-SELECT
+begin;
+insert into mailvolume (date, office_id, actual_volume, forecast_volume, price_increase_flag, created_at, updated_at)
+select
   s.date,
   o.office_id,
   s.actual_volume,
-  NULL,         -- 予測は後で埋める（当面はNULLのまま）
-  FALSE         -- ハイパラ導入前は FALSE 固定
-FROM stage_mail_volume s
-JOIN Office o ON o.office_code = :'office_code'
-ON CONFLICT (date, office_id) DO UPDATE
-SET actual_volume       = EXCLUDED.actual_volume,
-    forecast_volume     = EXCLUDED.forecast_volume,     -- ここはNULL上書きでOK（後から更新する前提）
-    price_increase_flag = EXCLUDED.price_increase_flag;
-COMMIT;
+  null,   -- 予測は後で更新
+  0,      -- int flag (no price increase)
+  now(),
+  now()
+from stage_mail_volume s
+join office o on o.office_code = :'office_code'
+on conflict (date, office_id) do update
+set  actual_volume       = excluded.actual_volume
+   , forecast_volume     = excluded.forecast_volume
+   , price_increase_flag = excluded.price_increase_flag
+   , updated_at          = now();
+commit;
 
 ------------------------------------------------------------
--- 5) Employee  (employees.csv)
---   employee_code,name,employment_type,position,default_work_hours,monthly_work_hours,department_code,team_name,is_certifier?
---   ※ is_certifier をCSVに載せない場合、DEFAULT FALSEが効くように下で補完します
+-- 5) employee  (employees.csv)
+--   columns:
+--   employee_code,name,employment_type,position,
+--   is_leader,is_vice_leader,default_work_hours,monthly_work_hours,
+--   department_code,team_name,is_certifier
 ------------------------------------------------------------
-DROP TABLE IF EXISTS stage_employees;
-CREATE TEMP TABLE stage_employees (
+drop table if exists stage_employees;
+create temp table stage_employees (
   employee_code      text,
   name               text,
   employment_type    text,
   position           text,
+  is_leader          int,
+  is_vice_leader     int,
   default_work_hours int,
   monthly_work_hours int,
   department_code    text,
@@ -174,166 +187,143 @@ CREATE TEMP TABLE stage_employees (
   is_certifier       text
 );
 
-COPY stage_employees
-FROM '/docker-entrypoint-initdb.d/csv/employees.csv'
-WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
-
--- （任意推奨）前検品：employee_code が空の行を弾く
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM stage_employees
-    WHERE employee_code IS NULL OR btrim(employee_code) = ''
-  ) THEN
-    RAISE EXCEPTION 'employees.csv: employee_code is required (found blank).';
-  END IF;
-END $$;
-
-BEGIN;
-INSERT INTO Employee (
+-- ヘッダ順に列リストを明示（CSVと一致させる）
+copy stage_employees (
   employee_code, name, employment_type, position,
-  default_work_hours, monthly_work_hours, team_id, is_certifier, updated_at
+  is_leader, is_vice_leader,
+  default_work_hours, monthly_work_hours,
+  department_code, team_name, is_certifier
 )
-SELECT
-  btrim(s.employee_code),
-  s.name,
-  s.employment_type,
-  s.position,
+from :'employees_file' with (format csv, header true, encoding 'UTF8');
+
+begin;
+insert into employee
+  (employee_code, name, employment_type, position,
+   default_work_hours, monthly_work_hours, team_id,
+   is_leader, is_vice_leader, is_certifier,
+   created_at, updated_at)
+select
+  btrim(s.employee_code)                    as employee_code,
+  coalesce(s.name,'')                       as name,
+  coalesce(s.employment_type,'')            as employment_type,
+  nullif(btrim(coalesce(s.position,'')),'') as position,
   s.default_work_hours,
   s.monthly_work_hours,
   t.team_id,
-  CASE
-    WHEN upper(btrim(s.is_certifier)) IN ('TRUE','T','1','Y') THEN TRUE
-    ELSE FALSE
-  END,
-  NOW()
-FROM stage_employees s
-JOIN Department d ON d.department_code = s.department_code
-JOIN Team       t ON t.department_id   = d.department_id
-                 AND t.team_name       = s.team_name
-ON CONFLICT (employee_code) DO UPDATE
-SET name               = EXCLUDED.name,
-    employment_type    = EXCLUDED.employment_type,
-    position           = EXCLUDED.position,
-    default_work_hours = EXCLUDED.default_work_hours,
-    monthly_work_hours = EXCLUDED.monthly_work_hours,
-    team_id            = EXCLUDED.team_id,
-    is_certifier       = EXCLUDED.is_certifier,
-    updated_at         = NOW();
-COMMIT;
+  coalesce(s.is_leader,0),
+  coalesce(s.is_vice_leader,0),
+  case when upper(btrim(coalesce(s.is_certifier,''))) in ('TRUE','T','1','Y') then 1 else 0 end,
+  now(), now()
+from stage_employees s
+join department d on d.department_code = s.department_code
+join team       t on t.department_id   = d.department_id
+                 and t.team_name       = s.team_name
+on conflict (employee_code) do update
+set  name               = excluded.name
+   , employment_type    = excluded.employment_type
+   , position           = excluded.position
+   , default_work_hours = excluded.default_work_hours
+   , monthly_work_hours = excluded.monthly_work_hours
+   , team_id            = excluded.team_id
+   , is_leader          = excluded.is_leader
+   , is_vice_leader     = excluded.is_vice_leader
+   , is_certifier       = excluded.is_certifier
+   , updated_at         = now();
+commit;
 
 ------------------------------------------------------------
--- 6) EmployeeZoneProficiency  (employee_zone_proficiencys.csv)  ※ zone_code不要
---   employee_code,department_code,team_name,zone_name,proficiency
+-- 6) employeezoneproficiency  (employee_zone_proficiencies.csv)
+--   columns: employee_code,zone_name,team_name,department_code,proficiency
 ------------------------------------------------------------
--- 6) EmployeeZoneProficiency  (employee_zone_proficiencies.csv)  ※ zone_code不要
-DROP TABLE IF EXISTS stage_ezp;
-CREATE TEMP TABLE stage_ezp (
-  employee_code   text,
+drop table if exists stage_ezp;
+create temp table stage_ezp (
+  employee_code text,
+  name          text,
   department_code text,
-  team_name       text,
-  zone_name       text,
-  proficiency     int
+  team_name     text,
+  zone_name     text,
+  proficiency   int
 );
+copy stage_ezp from :'ezp_file' with (format csv, header true, encoding 'UTF8');
 
-COPY stage_ezp
-FROM '/docker-entrypoint-initdb.d/csv/employee_zone_proficiencies.csv'
-WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
-
-BEGIN;
-WITH team_resolved AS (
-  SELECT s.*, d.department_id, t.team_id
-  FROM stage_ezp s
-  JOIN Department d ON d.department_code = s.department_code
-  JOIN Team t ON t.department_id = d.department_id AND t.team_name = s.team_name
+begin;
+with team_resolved as (
+  select s.*, d.department_id, t.team_id, e.employee_id
+  from stage_ezp s
+  join department d on d.department_code = s.department_code
+  join team       t on t.department_id   = d.department_id and t.team_name = s.team_name
+  join employee   e on e.employee_code   = s.employee_code
 ),
-zone_resolved AS (
-  SELECT tr.*, z.zone_id
-  FROM team_resolved tr
-  JOIN Zone z ON z.team_id = tr.team_id AND z.zone_name = tr.zone_name
+zone_resolved as (
+  select tr.*, z.zone_id
+  from team_resolved tr
+  join zone z on z.team_id = tr.team_id and z.zone_name = tr.zone_name
 )
-INSERT INTO EmployeeZoneProficiency (employee_id, zone_id, proficiency, updated_at)
-SELECT e.employee_id,
-       zr.zone_id,
-       GREATEST(0, LEAST(5, COALESCE(zr.proficiency, 0))),
-       NOW()
-FROM zone_resolved zr
-JOIN Employee e ON e.employee_code = zr.employee_code
-ON CONFLICT (employee_id, zone_id) DO UPDATE
-SET proficiency = EXCLUDED.proficiency,
-    updated_at  = NOW();
-COMMIT;
-
+insert into employeezoneproficiency (employee_id, zone_id, proficiency, updated_at)
+select zr.employee_id, zr.zone_id, coalesce(zr.proficiency,0), now()
+from zone_resolved zr
+on conflict (employee_id, zone_id) do update
+set  proficiency = excluded.proficiency
+   , updated_at  = now();
+commit;
 
 ------------------------------------------------------------
--- 7) EmployeeAvailability  (employee_availabilities.csv)
---   employee_code,available_mon,...,available_hol
+-- 7) employeeavailability  (employee_availabilities.csv)
+--   columns: employee_code,available_mon,...,available_hol  (0/1)
 ------------------------------------------------------------
-DROP TABLE IF EXISTS stage_eavail;
-CREATE TEMP TABLE stage_eavail (
-  employee_code  text,
-  available_mon  boolean,
-  available_tue  boolean,
-  available_wed  boolean,
-  available_thu  boolean,
-  available_fri  boolean,
-  available_sat  boolean,
-  available_sun  boolean,
-  available_hol  boolean
+drop table if exists stage_eavail;
+create temp table stage_eavail (
+  employee_code text,
+  available_mon int,
+  available_tue int,
+  available_wed int,
+  available_thu int,
+  available_fri int,
+  available_sat int,
+  available_sun int,
+  available_hol int
 );
+copy stage_eavail from :'eavail_file' with (format csv, header true, encoding 'UTF8');
 
-COPY stage_eavail
-FROM '/docker-entrypoint-initdb.d/csv/employee_availabilities.csv'
-WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
-
-BEGIN;
-INSERT INTO EmployeeAvailability (employee_id,
-  available_mon, available_tue, available_wed, available_thu,
-  available_fri, available_sat, available_sun, available_hol)
-SELECT e.employee_id,
-       COALESCE(s.available_mon, TRUE),
-       COALESCE(s.available_tue, TRUE),
-       COALESCE(s.available_wed, TRUE),
-       COALESCE(s.available_thu, TRUE),
-       COALESCE(s.available_fri, TRUE),
-       COALESCE(s.available_sat, FALSE),
-       COALESCE(s.available_sun, FALSE),
-       COALESCE(s.available_hol, FALSE)
-FROM stage_eavail s
-JOIN Employee e ON e.employee_code = s.employee_code
-ON CONFLICT (employee_id) DO UPDATE
-SET available_mon = EXCLUDED.available_mon,
-    available_tue = EXCLUDED.available_tue,
-    available_wed = EXCLUDED.available_wed,
-    available_thu = EXCLUDED.available_thu,
-    available_fri = EXCLUDED.available_fri,
-    available_sat = EXCLUDED.available_sat,
-    available_sun = EXCLUDED.available_sun,
-    available_hol = EXCLUDED.available_hol;
-COMMIT;
+begin;
+insert into employeeavailability
+  (employee_id, available_mon, available_tue, available_wed, available_thu, available_fri, available_sat, available_sun, available_hol)
+select e.employee_id,
+       coalesce(s.available_mon,1),
+       coalesce(s.available_tue,1),
+       coalesce(s.available_wed,1),
+       coalesce(s.available_thu,1),
+       coalesce(s.available_fri,1),
+       coalesce(s.available_sat,0),
+       coalesce(s.available_sun,0),
+       coalesce(s.available_hol,0)
+from stage_eavail s
+join employee e on e.employee_code = s.employee_id or e.employee_code = s.employee_code
+on conflict (employee_id) do update
+set  available_mon = excluded.available_mon
+   , available_tue = excluded.available_tue
+   , available_wed = excluded.available_wed
+   , available_thu = excluded.available_thu
+   , available_fri = excluded.available_fri
+   , available_sat = excluded.available_sat
+   , available_sun = excluded.available_sun
+   , available_hol = excluded.available_hol;
+commit;
 
 ------------------------------------------------------------
--- 8) Holiday (holidays_jp_2020_2050.csv)
---   CSV 想定: date,name  例) 2020-01-01,元日
---   -v holiday_csv=... でファイル名を差し替え可
+-- 8) holiday  (holidays_jp_2020_2050.csv)
 ------------------------------------------------------------
-\if :{?holiday_csv} \else \set holiday_csv 'holidays_jp_2020_2050.csv' \endif
-
--- 取り込み用ステージング
-DROP TABLE IF EXISTS stage_holiday;
-CREATE TEMP TABLE stage_holiday (
+drop table if exists stage_holiday;
+create temp table stage_holiday (
   holiday_date date,
   name         text
 );
+copy stage_holiday from :'holiday_file' with (format csv, header true, encoding 'UTF8');
 
-COPY stage_holiday (holiday_date, name)
-FROM '/docker-entrypoint-initdb.d/csv/holidays_jp_2020_2050.csv'
-WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
-
-BEGIN;
-INSERT INTO "Holiday" (holiday_date, name)
-SELECT holiday_date, name
-FROM stage_holiday
-ON CONFLICT (holiday_date) DO UPDATE
-SET name = EXCLUDED.name;  -- 名称の表記修正などがあれば上書き
-COMMIT;
+begin;
+insert into holiday (holiday_date, name)
+select holiday_date, name
+from stage_holiday
+on conflict (holiday_date) do update
+set name = excluded.name;
+commit;
