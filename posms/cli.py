@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 import jpholiday
 import typer
+from shutil import copyfile
 from sqlalchemy import inspect, text
 from typing import Annotated, Optional
 from .exporters.excel_exporter import write_dataframe_to_excel
@@ -106,6 +107,19 @@ def _season(ts: pd.Timestamp) -> int:
 
 def _is_hol(ts: pd.Timestamp) -> int:
     return int(jpholiday.is_holiday(ts.date()))
+    
+def _prepare_out_from_template(out: Path, template: Path) -> None:
+    """
+    out が無ければ、template (xlsm) をそのままコピーして作る。
+    既に out があれば何もしない（テンプレの分担予定表(案)やマクロを保持）。
+    """
+    out = Path(out)
+    template = Path(template)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not out.exists():
+        if not template.exists():
+            raise FileNotFoundError(f"Template not found: {template}")
+        copyfile(template, out)
 
 
 # ---------- Commands ----------------------------------------------
@@ -670,48 +684,68 @@ def export_sheet_jobtypes_fixedterm(
 def export_team_workbook(
     department_code: str = typer.Option(..., "--department-code", "-dc", help="例: DPT-A"),
     team: str = typer.Option(..., "--team", "-t", help="班名（例: 1班）"),
-    out: Path = typer.Option(Path("excel_out/班統合データ.xlsx"), "--out", help="出力先 .xlsx"),
+    out: Path = typer.Option(Path("excel_templates/班統合データ.xlsm"), "--out", help="出力先 .xlsm"),
     template: Path = typer.Option(
         Path("excel_templates/shift_template.xlsm"),
         "--template",
-        help="テンプレート（xlsmを指定すればマクロ保持）",
+        help="テンプレート（xlsmを指定すればマクロ保持。分担予定表(案)が入っていること）",
     ),
+    db_url: Annotated[str | None, typer.Option("--db-url")] = None,
+    sqlite: Annotated[Path | None, typer.Option("--sqlite")] = None,
+    plan_sheet_name: Annotated[str, typer.Option("--plan-sheet-name", help="テンプレ内のシート名確認用")] = "分担予定表(案)",
 ):
     """
-    部署・班ごとの Excel ブックを統合出力。
-    シート構成：社員 / 区情報 / 社員別需要 / 正社員服務表 / 期間雇用社員服務表
+    部署・班ごとの Excel ブックをテンプレ込みで統合出力。
+    シート構成（テンプレ保持）：
+      - 分担予定表(案)  ← テンプレからそのまま残す
+      - 社員 / 区情報 / 社員別需要 / 正社員服務表 / 期間雇用社員服務表
     """
     typer.echo(f"▶ 班「{team}」の統合Excelを作成中...")
 
-    # 1️⃣ 社員シート（テンプレ適用）
+    # 0) テンプレから out を作って「分担予定表(案)」を取り込む（マクロ含め全保持）
+    _prepare_out_from_template(out, template)
+    typer.echo(f"  - テンプレ基盤: {template} → {out}")
+
+    # （任意）テンプレ内に指定シートが入っているか軽く検証（openpyxl keep_vba があれば検査可能）
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(out, keep_vba=True, read_only=True)
+        if plan_sheet_name not in wb.sheetnames:
+            typer.secho(f"WARNING: 出力ブックに '{plan_sheet_name}' シートが見つかりません。テンプレの確認をしてください。", err=True)
+        wb.close()
+    except Exception:
+        # openpyxl が無くても処理自体は進める（コピー済みなので問題なし）
+        pass
+
+    # ここからは out をベースに「追記」していく
+    # 1️⃣ 社員
     export_sheet_employees(
         department_code=department_code,
         team=team,
         out=out,
         sheet="社員",
-        template=template,
+        template=out,  # ← out に追記
     )
 
-    # 2️⃣ 区情報（同じブックに追記）
+    # 2️⃣ 区情報
     export_sheet_zones(
         department_code=department_code,
         team=team,
         out=out,
         sheet="区情報",
-        template=out,  # 既存ブックに追記
+        template=out,
     )
 
     # 3️⃣ 社員別需要
     export_sheet_employee_demand(
         team=team,
         out=out,
-        template=out,  # 既存ブックに追記
+        template=out,
         sheet="社員別需要",
     )
 
     # 4️⃣ 正社員服務表
     export_sheet_jobtypes_regular(out=out, template=out, sheet="正社員服務表")
-
 
     # 5️⃣ 期間雇用社員服務表
     export_sheet_jobtypes_fixedterm(out=out, template=out, sheet="期間雇用社員服務表")
