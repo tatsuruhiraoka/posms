@@ -6,10 +6,9 @@ posms.models.predictor
 ModelPredictor
 --------------
 - MLflow Model Registry（models:/）または run_id（runs:/）からモデルをロード
-- **pyfunc フレーバー → xgboost フレーバー → sklearn フレーバー**の順でフォールバック
-- Registry が使えない/見つからない場合は、Experiment の最新 run に自動フォールバック
-- 推論入力は pandas.DataFrame 推奨（列名保持）。ndarray も可（内部で DataFrame 化）
-- 配達日ロジック（平日かつ祝日でない）に基づく繰越と千通丸めのポストプロセス関数を同梱
+- pyfunc → xgboost → sklearn の順でロードを試みる
+- run_id があれば runs:/<run_id>/model を優先
+- 通常郵便向けの簡単なポストプロセス（千通＋土日祝繰越）を apply_delivery_rules として提供
 """
 
 from __future__ import annotations
@@ -37,16 +36,16 @@ class ModelPredictor:
     Parameters
     ----------
     run_id : str | None
-        直接 run_id を指定する場合。None ならステージ指定が優先。
+        直接 run_id を指定する場合。指定されていれば runs:/<run_id>/model のみを使用する。
     stage : str | None
-        MLflow Model Registry のステージ名 (例: 'Production')。既定 'Production'。
-        None の場合は Registry を使わず、Experiment の最新 run へ直接フォールバック。
+        MLflow Model Registry のステージ名 (例: 'Production')。
+        run_id が None の場合のみ有効。
     model_name : str
-        モデル登録名。既定 'posms'。
+        Model Registry を使うときのモデル登録名。既定 'posms'。
     tracking_uri : str | None
         MLflow Tracking URI。None ならゼロ設定（<repo>/mlruns）。
     experiment : str
-        フォールバック検索に使う Experiment 名。既定 'posms'。
+        Registry が使えない/見つからない場合に、最新 run を探す Experiment 名。
     """
 
     def __init__(
@@ -62,57 +61,78 @@ class ModelPredictor:
         self._client = mlflow.tracking.MlflowClient()
         self._experiment_name = experiment
 
-        # 優先 URI を決定
-        if run_id:
-            self.model_uri = f"runs:/{run_id}/model"
-        elif stage:
-            self.model_uri = f"models:/{model_name}/{stage}"
-        else:
-            # stage=None → 最初から最新 run へフォールバック
-            self.model_uri = self._latest_run_uri(experiment)
-
-        # ロード先（どれか1つがセットされる）
         self._pyfunc_model: Optional[mlflow.pyfunc.PyFuncModel] = None
         self._xgb_booster: Optional[xgb.Booster] = None
         self._sk_model: Optional[Any] = None
 
-        LOGGER.info("Loading model from MLflow URI: %s", self.model_uri)
-        self._load_model(self.model_uri)
+        # -------------------------------
+        # モデル URI を決定
+        # -------------------------------
+        if run_id:
+            uris = [f"runs:/{run_id}/model"]
+        else:
+            uris = []
+            if stage:
+                uris.append(f"models:/{model_name}/{stage}")
+            uris.append(self._latest_run_uri(experiment))
+
+        last_err: Optional[Exception] = None
+        loaded_uri: Optional[str] = None
+
+        for uri in uris:
+            LOGGER.info("Trying MLflow model: %s", uri)
+            try:
+                self._load_model_from_uri(uri)
+                loaded_uri = uri
+                break
+            except Exception as e:  # noqa: BLE001
+                LOGGER.warning("Failed to load model from %s: %s", uri, e)
+                last_err = e
+
+        if loaded_uri is None:
+            raise RuntimeError(f"モデルをロードできませんでした: {uris}") from last_err
+
+        self.model_uri = loaded_uri
+        LOGGER.info("Model loaded successfully from: %s", self.model_uri)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
-        """予測を返す。`X` は DataFrame / ndarray のいずれでも可。"""
-        X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
-        
-        #MLflow の入力スキーマ（float32）に合わせて数値・bool列を float32 に統一
-        X_df = X_df.copy()
-        num_bool_cols = X_df.select_dtypes(include=["number", "bool"]).columns
-        if len(num_bool_cols) > 0:
-        	# 一括キャスト（安全のため copy 後に代入）
-        	X_df[num_bool_cols] = X_df[num_bool_cols].astype(np.float32)
+    def predict(self, X: pd.DataFrame | np.ndarray | Dict[str, Any]) -> np.ndarray:
+        """予測を返す。`X` は DataFrame / ndarray / dict のいずれでも可。"""
+        if isinstance(X, pd.DataFrame):
+            X_df = X.copy()
+        elif isinstance(X, dict):
+            X_df = pd.DataFrame([X])
+        else:
+            X_df = pd.DataFrame(X)
 
-        # 1) pyfunc: DataFrame そのまま predict できる（signature も活用）
+        # 数値・bool列を float32 に統一
+        num_cols = X_df.select_dtypes(include=["number", "bool"]).columns
+        if len(num_cols) > 0:
+            X_df[num_cols] = X_df[num_cols].astype(np.float32)
+
+        # 1) pyfunc
         if self._pyfunc_model is not None:
             pred = self._pyfunc_model.predict(X_df)
             return np.asarray(pred).reshape(-1)
 
-        # 2) xgboost: Booster の場合は DMatrix に変換して predict
+        # 2) xgboost
         if self._xgb_booster is not None:
             dmat = xgb.DMatrix(X_df, missing=np.nan)
-            # best_iteration までで予測（互換フォールバック付き）
             try:
                 best_it = getattr(self._xgb_booster, "best_iteration", None)
                 if best_it is not None:
-                    return self._xgb_booster.predict(dmat, iteration_range=(0, int(best_it) + 1))
+                    return self._xgb_booster.predict(
+                        dmat, iteration_range=(0, int(best_it) + 1)
+                    )
             except TypeError:
                 ntree_limit = getattr(self._xgb_booster, "best_ntree_limit", None)
                 if ntree_limit is not None:
                     return self._xgb_booster.predict(dmat, ntree_limit=int(ntree_limit))
             return self._xgb_booster.predict(dmat)
 
-        # 3) sklearn: そのまま predict
+        # 3) sklearn
         if self._sk_model is not None:
             pred = self._sk_model.predict(X_df)
             return np.asarray(pred).reshape(-1)
@@ -124,46 +144,49 @@ class ModelPredictor:
         return float(self.predict(pd.DataFrame([X]))[0])
 
     # ------------------------------------------------------------------
-    # Internals
+    # Internals: モデルロード
     # ------------------------------------------------------------------
-    def _load_model(self, uri: str) -> None:
+    def _load_model_from_uri(self, uri: str) -> None:
         """
-        **pyfunc → xgboost → sklearn** の順でロード。
-        すべて失敗したら Experiment の最新 run にフォールバックして再試行。
+        指定された URI から pyfunc → xgboost → sklearn の順でロード。
         """
-        # 1) pyfunc（最も互換性が高い）
+        self._pyfunc_model = None
+        self._xgb_booster = None
+        self._sk_model = None
+
+        last_err: Optional[Exception] = None
+
+        # 1) pyfunc
         try:
             self._pyfunc_model = mlflow.pyfunc.load_model(uri)
             LOGGER.info("Loaded model as pyfunc.")
             return
-        except Exception:
+        except Exception as e:
+            last_err = e
             self._pyfunc_model = None
 
-        # 2) xgboost（Booster 直読み）
+        # 2) xgboost
         try:
             self._xgb_booster = mlflow.xgboost.load_model(uri)
             LOGGER.info("Loaded model as xgboost Booster.")
             return
-        except Exception:
+        except Exception as e:
+            last_err = e
             self._xgb_booster = None
 
-        # 3) sklearn（古い run 向け）
+        # 3) sklearn
         try:
             self._sk_model = mlflow.sklearn.load_model(uri)
             LOGGER.info("Loaded model as sklearn estimator.")
             return
-        except Exception:
+        except Exception as e:
+            last_err = e
             self._sk_model = None
 
-        # フォールバック：最新 run
-        fallback_uri = self._latest_run_uri(self._experiment_name)
-        LOGGER.warning("Falling back to latest run: %s", fallback_uri)
-
-        # 再帰的に最新 run でロードを試みる（失敗時は例外）
-        self._load_model(fallback_uri)
+        raise RuntimeError(f"Failed to load model from URI: {uri}") from last_err
 
     def _latest_run_uri(self, experiment_name: str) -> str:
-        """Experiment の最新 run から runs:/.../model を返す。見つからなければ例外。"""
+        """Experiment の最新 run から runs:/.../model を返す。"""
         exp = self._client.get_experiment_by_name(experiment_name)
         if not exp:
             raise RuntimeError(f"Experiment not found: {experiment_name}")
@@ -184,7 +207,11 @@ class ModelPredictor:
         """千通単位の四捨五入（負値は 0 に丸め）"""
         if x <= 0:
             return 0
-        return int((Decimal(str(x)) / Decimal("1000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)) * 1000
+        return int(
+            (Decimal(str(x)) / Decimal("1000")).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        ) * 1000
 
     @staticmethod
     def _is_holiday(dt) -> bool:
@@ -194,8 +221,9 @@ class ModelPredictor:
 
     @classmethod
     def _is_delivery_day(cls, dt) -> bool:
-        """配達日= 平日かつ祝日でない"""
-        return (dt.weekday() < 5) and (not cls._is_holiday(dt))
+        """配達日= 平日かつ祝日でない（通常郵便用）"""
+        d = dt if hasattr(dt, "weekday") else pd.to_datetime(dt)
+        return (d.weekday() < 5) and (not cls._is_holiday(d))
 
     @classmethod
     def apply_delivery_rules(
@@ -207,27 +235,10 @@ class ModelPredictor:
         extend_to_next_delivery: bool = True,
     ) -> "pd.DataFrame":
         """
-        生の“日次予測”に、土日祝の繰り越し＆千通丸めを適用するだけのポストプロセス。
-        ここでは“再予測”は行いません。
-
-        Parameters
-        ----------
-        raw : pd.Series | pd.DataFrame
-            日付を DatetimeIndex に持つ日次予測。
-            - Series の場合: 値が生予測
-            - DataFrame の場合: `value_col` で列名を指定（未指定なら先頭列）
-        value_col : str | None
-            DataFrame の場合の列名
-        round_to_thousand : bool
-            True なら千通単位（四捨五入）に丸めて配達日に計上
-        extend_to_next_delivery : bool
-            期間末尾が非配達日のとき、次の配達日（期間外）に繰り越し分を1行追加
-
-        Returns
-        -------
-        pd.DataFrame ・・・ columns = ["date","raw_pred","carry_in","deliver_pred","is_delivery_day"]
+        通常郵便向け:
+        - 土日祝の繰り越し
+        - 千通単位の四捨五入
         """
-        # 入力を Series に正規化（D 日次に揃える）
         if isinstance(raw, pd.DataFrame):
             s = raw[value_col] if value_col and value_col in raw.columns else raw.iloc[:, 0]
         else:
@@ -237,30 +248,36 @@ class ModelPredictor:
         carry = 0.0
         rows = []
         for dt, val in s.items():
-            val = float(val)
+            v = float(val)
             if cls._is_delivery_day(dt):
-                delivered = val + carry
-                deliver = cls._round_to_thousand_half_up(delivered) if round_to_thousand else delivered
-                rows.append((dt.date(), val, carry if carry > 0 else None, int(max(0, deliver)), True))
+                delivered = v + carry
+                if round_to_thousand:
+                    deliver = cls._round_to_thousand_half_up(delivered)
+                else:
+                    deliver = max(0.0, delivered)
+                rows.append((dt.date(), v, carry if carry > 0 else None, int(max(0, deliver)), True))
                 carry = 0.0
             else:
-                carry += val
-                rows.append((dt.date(), val, None, 0, False))
+                carry += v
+                rows.append((dt.date(), v, None, 0, False))
 
-        # 末尾が非配達日で carry が残れば、次の配達日に繰り越し（期間外1行を追加）
         if extend_to_next_delivery and carry > 0:
             dt = s.index[-1] + pd.Timedelta(days=1)
             while not cls._is_delivery_day(dt):
                 dt += pd.Timedelta(days=1)
-            deliver = cls._round_to_thousand_half_up(carry) if round_to_thousand else carry
+            deliver = cls._round_to_thousand_half_up(carry) if round_to_thousand else max(0.0, carry)
             rows.append((dt.date(), 0.0, carry, int(max(0, deliver)), True))
 
-        return pd.DataFrame(rows, columns=["date","raw_pred","carry_in","deliver_pred","is_delivery_day"])
-
-
+        return pd.DataFrame(
+            rows,
+            columns=["date", "raw_pred", "carry_in", "deliver_pred", "is_delivery_day"],
+        )
+        
 # ------------ 手動テスト（任意） ------------
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    )
     try:
         predictor = ModelPredictor()
         dummy = pd.DataFrame(

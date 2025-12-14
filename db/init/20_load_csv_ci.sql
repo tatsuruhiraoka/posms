@@ -25,7 +25,7 @@ truncate table
   zone,
   employee,
   jobtype,
-  mailvolume,
+  mailvolume_by_type,
   holiday
 restart identity cascade;
 \endif
@@ -34,5 +34,5 @@ restart identity cascade;
 \i db/init/20_load_csv.sql
 
 -- 統計更新（読み性能の安定化）
-analyze jobtype, zone, demandprofile, mailvolume,
+analyze jobtype, zone, demandprofile, mailvolume_by_type,
         employee, employeezoneproficiency, employeeavailability, holiday;

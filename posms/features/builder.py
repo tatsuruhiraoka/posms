@@ -59,6 +59,9 @@ class FeatureBuilder:
     office_id : int | None
         対象局 ID。None の場合、データ内に 1 局しか無ければ自動選択。
         複数局が存在するのに未指定なら例外。
+    mail_kind : str
+        対象の郵便種別。mailvolume_by_type.mail_kind の値（normal, yu_packet, ...）。
+        旧 MailVolume テーブルを使う場合は無視される。
     base_dir : Path | None
         （将来拡張用）プロジェクトルート推定に使用。
     engine : sqlalchemy.engine.Engine | None
@@ -68,16 +71,19 @@ class FeatureBuilder:
     def __init__(
         self,
         office_id: Optional[int] = None,
+        mail_kind: str = "normal",
         base_dir: Path | None = None,
         engine: Engine | None = None,
     ) -> None:
         self.base_dir = base_dir or Path(__file__).resolve().parents[2]
         self.office_id = office_id
+        self.mail_kind = mail_kind
         self.engine = engine or self._make_engine_from_env()
         LOGGER.info(
-            "FeatureBuilder initialized. db=%s office_id=%s",
+            "FeatureBuilder initialized. db=%s office_id=%s mail_kind=%s",
             self.engine.url,
             self.office_id,
+            self.mail_kind,
         )
 
     # ------------------------- DB 接続 -------------------------
@@ -110,64 +116,125 @@ class FeatureBuilder:
     def _resolve_mail_table_name(self) -> str:
         """
         実在テーブル名を自動解決（大文字/小文字/別名に頑健）。
-        戻り値はクエリでそのまま使える文字列（引用が必要なら "MailVolume" を返す）。
+
+        優先順位:
+        - mailvolume_by_type / "MailVolumeByType"
+        - mailvolume / "MailVolume" / mail_volume
         """
         insp = inspect(self.engine)
-        existing = set(insp.get_table_names(schema="public"))
+
+        # SQLite と Postgres で get_table_names の呼び方を変える
+        if insp.dialect.name == "sqlite":
+            existing = set(insp.get_table_names())
+        else:
+            # Postgres 等（public スキーマ）
+            existing = set(insp.get_table_names(schema="public"))
 
         def norm(s: str) -> str:
             return s.replace('"', "").lower()
 
-        candidates = ["mailvolume", '"MailVolume"', "mail_volume"]
+        candidates = [
+            "mailvolume_by_type",
+            '"MailVolumeByType"',
+            "mailvolume",
+            '"MailVolume"',
+            "mail_volume_by_type",
+            "mail_volume",
+        ]
         existing_norm = {t.lower() for t in existing}
         for c in candidates:
             if norm(c) in existing_norm:
                 return c
         raise RuntimeError(
-            f"MailVolume テーブルが見つかりません。存在テーブル={sorted(existing)} / 期待候補={candidates}"
+            f"MailVolume/ByType テーブルが見つかりません。存在テーブル={sorted(existing)} / 期待候補={candidates}"
         )
 
     # ----------------------- データ読み込み ---------------------
     def _load_mail(self) -> pd.DataFrame:
         """
-        MailVolume（もしくは同等名）から系列を読み込み。
+        MailVolume / MailVolumeByType から系列を読み込み。
         必要列: date, office_id, actual_volume, price_increase_flag
         """
         tbl = self._resolve_mail_table_name()
+        tbl_norm = tbl.replace('"', "").lower()
 
-        if self.office_id is not None:
-            sql = f"""
-                SELECT "date", office_id, actual_volume, price_increase_flag
-                FROM {tbl}
-                WHERE office_id = :office_id
-                ORDER BY "date"
-            """
-            df = pd.read_sql(
-                text(sql),
-                self.engine,
-                params={"office_id": self.office_id},
-                parse_dates=["date"],
-            )
-        else:
-            sql = f"""
-                SELECT "date", office_id, actual_volume, price_increase_flag
-                FROM {tbl}
-                ORDER BY office_id, "date"
-            """
-            df = pd.read_sql(text(sql), self.engine, parse_dates=["date"])
-            n_offices = df["office_id"].nunique() if not df.empty else 0
-            if n_offices == 0:
-                raise ValueError("MailVolume が空です。データを投入してください。")
-            if n_offices > 1:
-                raise ValueError(
-                    "office_id を指定してください（複数局のデータが存在します）。"
+        if "mailvolume_by_type" in tbl_norm:
+            # ---- 種別別テーブル（mailvolume_by_type） ----
+            if self.office_id is not None:
+                sql = f"""
+                    SELECT "date", office_id, actual_volume, price_increase_flag
+                    FROM {tbl}
+                    WHERE office_id = :office_id
+                      AND mail_kind = :mail_kind
+                    ORDER BY "date"
+                """
+                df = pd.read_sql(
+                    text(sql),
+                    self.engine,
+                    params={"office_id": self.office_id, "mail_kind": self.mail_kind},
+                    parse_dates=["date"],
                 )
-            self.office_id = int(df["office_id"].iloc[0])
-            df = df[df["office_id"] == self.office_id].copy()
+            else:
+                # office_id 未指定時：1局だけなら自動で選ぶ（従来仕様を踏襲）
+                sql = f"""
+                    SELECT "date", office_id, actual_volume, price_increase_flag
+                    FROM {tbl}
+                    WHERE mail_kind = :mail_kind
+                    ORDER BY office_id, "date"
+                """
+                df = pd.read_sql(
+                    text(sql),
+                    self.engine,
+                    params={"mail_kind": self.mail_kind},
+                    parse_dates=["date"],
+                )
+                n_offices = df["office_id"].nunique() if not df.empty else 0
+                if n_offices == 0:
+                    raise ValueError(
+                        f"MailVolumeByType(mail_kind={self.mail_kind}) が空です。データを投入してください。"
+                    )
+                if n_offices > 1:
+                    raise ValueError(
+                        "office_id を指定してください（複数局のデータが存在します）。"
+                    )
+                self.office_id = int(df["office_id"].iloc[0])
+                df = df[df["office_id"] == self.office_id].copy()
+        else:
+            # ---- 旧 MailVolume テーブル（後方互換用）----
+            if self.office_id is not None:
+                sql = f"""
+                    SELECT "date", office_id, actual_volume, price_increase_flag
+                    FROM {tbl}
+                    WHERE office_id = :office_id
+                    ORDER BY "date"
+                """
+                df = pd.read_sql(
+                    text(sql),
+                    self.engine,
+                    params={"office_id": self.office_id},
+                    parse_dates=["date"],
+                )
+            else:
+                sql = f"""
+                    SELECT "date", office_id, actual_volume, price_increase_flag
+                    FROM {tbl}
+                    ORDER BY office_id, "date"
+                """
+                df = pd.read_sql(text(sql), self.engine, parse_dates=["date"])
+                n_offices = df["office_id"].nunique() if not df.empty else 0
+                if n_offices == 0:
+                    raise ValueError("MailVolume が空です。データを投入してください。")
+                if n_offices > 1:
+                    raise ValueError(
+                        "office_id を指定してください（複数局のデータが存在します）。"
+                    )
+                self.office_id = int(df["office_id"].iloc[0])
+                df = df[df["office_id"] == self.office_id].copy()
 
         if df.empty:
             raise ValueError(
-                f"MailVolume に office_id={self.office_id} のデータがありません。"
+                f"対象テーブル {tbl} に office_id={self.office_id}, "
+                f"mail_kind={getattr(self, 'mail_kind', None)} のデータがありません。"
             )
 
         # price_increase_flag を 0/1 に正規化（欠損は 0）
@@ -249,7 +316,6 @@ class FeatureBuilder:
         df["rolling_mean_7"] = df["actual_volume"].shift(1).rolling(7).mean()
 
         # price flag は _load_mail で 0/1 化済み
-        # 列の存在を保証（通常は全て揃う想定）
         for c in FEATURE_COLUMNS:
             if c not in df.columns:
                 df[c] = 0
@@ -315,7 +381,8 @@ class FeatureBuilder:
                 "price_increase_flag": 0,
             }
             base = pd.concat(
-                [base, pd.DataFrame([new_row])], ignore_index=True
+                [base, pd.DataFrame([new_row])],
+                ignore_index=True,
             ).sort_values("date")
 
         # 特徴量作成（dropna しない）
@@ -333,13 +400,17 @@ class FeatureBuilder:
             )
 
         X_row = row[FEATURE_COLUMNS].astype(float)
-        pred = (
-            ModelPredictor(
-                run_id=run_id,
-                stage=stage,
-                model_name=model_name,
-                tracking_uri=tracking_uri,
-            ).predict(X_row)
-        )[0]
-        LOGGER.info("Predict %s → %.2f (office_id=%s)", tgt, pred, self.office_id)
+        pred = ModelPredictor(
+            run_id=run_id,
+            stage=stage,
+            model_name=model_name,
+            tracking_uri=tracking_uri,
+        ).predict(X_row)[0]
+        LOGGER.info(
+            "Predict %s → %.2f (office_id=%s, mail_kind=%s)",
+            tgt,
+            pred,
+            self.office_id,
+            self.mail_kind,
+        )
         return float(pred)
