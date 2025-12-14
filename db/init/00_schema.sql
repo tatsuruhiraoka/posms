@@ -101,21 +101,28 @@ create table employee (
   check (is_leader + is_vice_leader <= 1)      -- 同一人が班長かつ副班長にならない
 );
 
--- 3. 供給データ（局全体の物数）
-create table mailvolume (
+-- 3. 供給データ（局全体の物数：種別別）
+create table mailvolume_by_type (
   date date not null,
   office_id int not null references office(office_id),
+  mail_kind text not null,          -- normal / kakitome / yu_packet / ... を入れる
   actual_volume int,
   forecast_volume int,
   price_increase_flag int not null default 0,
   created_at timestamp default now(),
   updated_at timestamp default now(),
-  primary key (date, office_id),
-  constraint chk_mv_actual_nonneg check (actual_volume is null or actual_volume >= 0),
-  constraint chk_mv_forecast_nonneg check (forecast_volume is null or forecast_volume >= 0)
+  primary key (date, office_id, mail_kind),
+  constraint chk_mvt_actual_nonneg
+    check (actual_volume   is null or actual_volume   >= 0),
+  constraint chk_mvt_forecast_nonneg
+    check (forecast_volume is null or forecast_volume >= 0)
 );
 
-create index if not exists idx_mailvolume_office_date on mailvolume(office_id, date);
+create index if not exists idx_mailvolume_by_type_office_date
+  on mailvolume_by_type(office_id, date);
+
+create index if not exists idx_mailvolume_by_type_kind
+  on mailvolume_by_type(mail_kind);
 
 -- 各区の曜日ごとの需要
 create table demandprofile (

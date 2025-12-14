@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/hiraokatatsuru/Library/Mobile%20Documents/com~apple~CloudDocs/postal-operation-shift-management-system/mlruns/965878853248401572/213eab265c3d4097b76de18e3cd36be9/artifacts
+end_time: 1764540477810
+entry_point_name: ''
+experiment_id: '965878853248401572'
+lifecycle_stage: active
+run_id: 213eab265c3d4097b76de18e3cd36be9
+run_name: mercurial-hog-722
+run_uuid: 213eab265c3d4097b76de18e3cd36be9
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1764540474483
+status: 3
+tags: []
+user_id: hiraokatatsuru

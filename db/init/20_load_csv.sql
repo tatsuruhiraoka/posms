@@ -14,7 +14,7 @@ select
   (:'csvdir' || '/jobtypes.csv')                      as jobtypes_file,
   (:'csvdir' || '/zones.csv')                         as zones_file,
   (:'csvdir' || '/demand_profiles.csv')               as demand_profiles_file,
-  (:'csvdir' || '/mail_volumes.csv')                  as mail_volumes_file,
+  (:'csvdir' || '/postal_datas.csv')                  as postal_datas_file,
   (:'csvdir' || '/employees.csv')                     as employees_file,
   (:'csvdir' || '/employee_zone_proficiencies.csv')   as ezp_file,
   (:'csvdir' || '/employee_availabilities.csv')       as eavail_file,
@@ -133,36 +133,198 @@ set  demand_mon     = excluded.demand_mon
 commit;
 
 ------------------------------------------------------------
--- 4) mailvolume  (mail_volumes.csv)
---   columns: date,actual_volume
---   office_code は -v office_code=... で上書き可（未指定は 'HQ'）
+-- 4) mailvolume / mailvolume_by_type  (postal_datas.csv)
+--   columns:
+--     日付, 通常郵便, 書留, ゆうパケット, レターパックライト,
+--     レターパックプラス, 特定記録, ゆうパック, eパケット,
+--     EMS, 年賀組立, 年賀配達
 ------------------------------------------------------------
 \if :{?office_code} \else \set office_code 'HQ' \endif
 
-drop table if exists stage_mail_volume;
-create temp table stage_mail_volume (
-  date           date,
-  actual_volume  int
+drop table if exists stage_postal_datas;
+create temp table stage_postal_datas (
+  date             date,
+  normal           int,
+  kakitome         int,
+  yu_packet        int,
+  letterpack_light int,
+  letterpack_plus  int,
+  tokutei_kiroku   int,
+  yu_pack          int,
+  e_packet         int,
+  ems              int,
+  nenga_assembly   int,
+  nenga_delivery   int
 );
-copy stage_mail_volume (date, actual_volume) from :'mail_volumes_file' with (format csv, header true, encoding 'UTF8');
+
+-- ★ 日本語ヘッダーの列をこの順番で読み取る
+copy stage_postal_datas (
+  date,
+  normal,
+  kakitome,
+  yu_packet,
+  letterpack_light,
+  letterpack_plus,
+  tokutei_kiroku,
+  yu_pack,
+  e_packet,
+  ems,
+  nenga_assembly,
+  nenga_delivery
+)
+from :'postal_datas_file'
+with (format csv, header true, encoding 'UTF8');
 
 begin;
-insert into mailvolume (date, office_id, actual_volume, forecast_volume, price_increase_flag, created_at, updated_at)
-select
-  s.date,
-  o.office_id,
-  s.actual_volume,
-  null,   -- 予測は後で更新
-  0,      -- int flag (no price increase)
-  now(),
-  now()
-from stage_mail_volume s
+
+-------------------------------------------------------------------
+-- 4) mailvolume_by_type（種別別データを全部入れる）
+---------------------------------------------------------------------- 通常郵便
+insert into mailvolume_by_type (
+  date, office_id, mail_kind,
+  actual_volume, forecast_volume, price_increase_flag,
+  created_at, updated_at)
+select s.date, o.office_id, 'normal',
+       s.normal, null, 0, now(), now()
+from stage_postal_datas s
 join office o on o.office_code = :'office_code'
-on conflict (date, office_id) do update
-set  actual_volume       = excluded.actual_volume
-   , forecast_volume     = excluded.forecast_volume
-   , price_increase_flag = excluded.price_increase_flag
-   , updated_at          = now();
+where s.normal is not null
+on conflict (date, office_id, mail_kind)
+  do update set actual_volume = excluded.actual_volume,
+                forecast_volume = excluded.forecast_volume,
+                price_increase_flag = excluded.price_increase_flag,
+                updated_at = now();
+
+-- 書留
+insert into mailvolume_by_type 
+select s.date, o.office_id, 'kakitome',
+       s.kakitome, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.kakitome is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
+-- ゆうパケット
+insert into mailvolume_by_type
+select s.date, o.office_id, 'yu_packet',
+       s.yu_packet, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.yu_packet is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
+-- レターパックライト
+insert into mailvolume_by_type
+select s.date, o.office_id, 'letterpack_light',
+       s.letterpack_light, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.letterpack_light is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
+-- レターパックプラス
+insert into mailvolume_by_type
+select s.date, o.office_id, 'letterpack_plus',
+       s.letterpack_plus, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.letterpack_plus is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
+-- 特定記録
+insert into mailvolume_by_type
+select s.date, o.office_id, 'tokutei_kiroku',
+       s.tokutei_kiroku, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.tokutei_kiroku is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
+-- ゆうパック
+insert into mailvolume_by_type
+select s.date, o.office_id, 'yu_pack',
+       s.yu_pack, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.yu_pack is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
+-- eパケット
+insert into mailvolume_by_type
+select s.date, o.office_id, 'e_packet',
+       s.e_packet, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.e_packet is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
+-- EMS
+insert into mailvolume_by_type
+select s.date, o.office_id, 'ems',
+       s.ems, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.ems is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
+-- 年賀組立
+insert into mailvolume_by_type
+select s.date, o.office_id, 'nenga_assembly',
+       s.nenga_assembly, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.nenga_assembly is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
+-- 年賀配達
+insert into mailvolume_by_type
+select s.date, o.office_id, 'nenga_delivery',
+       s.nenga_delivery, null, 0, now(), now()
+from stage_postal_datas s
+join office o on o.office_code = :'office_code'
+where s.nenga_delivery is not null
+on conflict (date, office_id, mail_kind) do update
+set actual_volume = excluded.actual_volume,
+    forecast_volume = excluded.forecast_volume,
+    price_increase_flag = excluded.price_increase_flag,
+    updated_at = now();
+
 commit;
 
 ------------------------------------------------------------

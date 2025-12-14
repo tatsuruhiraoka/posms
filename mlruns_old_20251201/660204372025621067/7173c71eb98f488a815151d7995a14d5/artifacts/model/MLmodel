@@ -1,0 +1,34 @@
+artifact_path: model
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.12.9
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.7.1
+is_signature_from_type_hint: false
+mlflow_version: 2.22.1
+model_size_bytes: 14618
+model_uuid: a909a397fc0a48fd90ebf5d0e9b5c0e7
+prompts: null
+run_id: 7173c71eb98f488a815151d7995a14d5
+saved_input_example_info:
+  artifact_path: input_example.json
+  pandas_orient: split
+  serving_input_path: serving_input_example.json
+  type: dataframe
+signature:
+  inputs: '[{"type": "float", "name": "weekday", "required": true}, {"type": "float",
+    "name": "month", "required": true}, {"type": "float", "name": "lag_1", "required":
+    true}]'
+  outputs: '[{"type": "tensor", "tensor-spec": {"dtype": "float32", "shape": [-1]}}]'
+  params: null
+type_hint_from_example: false
+utc_time_created: '2025-09-06 01:43:05.801964'
