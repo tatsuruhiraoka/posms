@@ -1,104 +1,92 @@
 \set ON_ERROR_STOP on
 -- 10_seed_masters.sql
 
-BEGIN;
+begin;
 
--- ========= Office =========
-INSERT INTO Office (office_name, office_code, is_active, updated_at)
-VALUES ('局', 'HQ', TRUE, NOW())
-ON CONFLICT (office_code) DO UPDATE
-SET office_name = EXCLUDED.office_name,
-    is_active   = EXCLUDED.is_active,
-    updated_at  = NOW();
+-- ========= office =========
+insert into office (office_name, office_code, is_active, updated_at)
+values ('局', 'HQ', 1, now())
+on conflict (office_code) do update
+set office_name = excluded.office_name,
+    is_active   = excluded.is_active,
+    updated_at  = now();
 
--- ========= Department =========
-INSERT INTO Department (office_id, department_name, department_code, is_active, updated_at)
-VALUES
-  ((SELECT office_id FROM Office WHERE office_code = 'HQ'), '第一集配営業部', 'DPT-A', TRUE, NOW()),
-  ((SELECT office_id FROM Office WHERE office_code = 'HQ'), '第二集配営業部', 'DPT-B', TRUE, NOW())
-ON CONFLICT (department_code) DO UPDATE
-SET department_name = EXCLUDED.department_name,
-    office_id       = EXCLUDED.office_id,
-    is_active       = EXCLUDED.is_active,
-    updated_at      = NOW();
+-- ========= department =========
+insert into department (office_id, department_name, department_code, is_active, updated_at)
+values
+  ((select office_id from office where office_code = 'HQ'), '第一集配営業部', 'DPT-A', 1, now()),
+  ((select office_id from office where office_code = 'HQ'), '第二集配営業部', 'DPT-B', 1, now())
+on conflict (department_code) do update
+set department_name = excluded.department_name,
+    office_id       = excluded.office_id,
+    is_active       = excluded.is_active,
+    updated_at      = now();
 
--- ========= Team =========
--- ※ (department_id, team_name) に UNIQUE がある前提（前の提案どおり）
-WITH d1 AS (
-  SELECT department_id FROM Department WHERE department_code = 'DPT-A'
+-- ========= team =========
+with d1 as (
+  select department_id from department where department_code = 'DPT-A'
 ),
-d2 AS (
-  SELECT department_id FROM Department WHERE department_code = 'DPT-B'
+d2 as (
+  select department_id from department where department_code = 'DPT-B'
 )
-INSERT INTO Team (department_id, team_name, is_active, updated_at)
-SELECT d1.department_id, t, TRUE, NOW() FROM d1, UNNEST(ARRAY['1班','2班','3班','4班','5班']) AS t
-UNION ALL
-SELECT d2.department_id, t, TRUE, NOW() FROM d2, UNNEST(ARRAY['6班','7班','8班','9班']) AS t
-ON CONFLICT (department_id, team_name) DO UPDATE
-SET is_active  = EXCLUDED.is_active,
-    updated_at = NOW();
+insert into team (department_id, team_name, is_active, updated_at)
+select d1.department_id, t, 1, now() from d1, unnest(array['1班','2班','3班','4班','5班']) as t
+union all
+select d2.department_id, t, 1, now() from d2, unnest(array['6班','7班','8班','9班']) as t
+on conflict (department_id, team_name) do update
+set is_active  = excluded.is_active,
+    updated_at = now();
 
--- ========= LeaveType =========
-INSERT INTO LeaveType (leave_code, leave_name, leave_category, updated_at) VALUES
-  -- REGULAR
-  ('OFF_DUTY',            '非番',   'REGULAR', NOW()),
-  ('WEEKLY_OFF',          '週休',   'REGULAR', NOW()),
-  ('PUBLIC_HOLIDAY_OFF',  '祝休',   'REGULAR', NOW()),
-  -- SPECIAL
-  ('PLANNED_ANNUAL_LEAVE','計年',   'SPECIAL', NOW()),
-  ('ANNUAL_LEAVE',        '年休',   'SPECIAL', NOW()),
-  ('SUMMER_LEAVE',        '夏期',   'SPECIAL', NOW()),
-  ('WINTER_LEAVE',        '冬期',   'SPECIAL', NOW()),
-  ('COMPENSATORY_LEAVE',  '代休',   'SPECIAL', NOW()),
-  ('APPROVED_ABSENCE',    '承欠',   'SPECIAL', NOW()),
-  ('MATERNITY_LEAVE',     '産休',   'SPECIAL', NOW()),
-  ('PARENTAL_LEAVE',      '育休',   'SPECIAL', NOW()),
-  ('CAREGIVER_LEAVE',     '介護',   'SPECIAL', NOW()),
-  ('SICK_LEAVE',          '病休',   'SPECIAL', NOW()),
-  ('LEAVE_OF_ABSENCE',    '休職',   'SPECIAL', NOW()),
-  ('OTHER',               'その他', 'SPECIAL', NOW())
-ON CONFLICT (leave_code) DO UPDATE
-SET leave_name     = EXCLUDED.leave_name,
-    leave_category = EXCLUDED.leave_category,
-    updated_at     = NOW();
+-- ========= leavetype =========
+insert into leavetype (leave_code, leave_name, leave_category, updated_at) values
+  ('OFF_DUTY',            '非番',   'REGULAR', now()),
+  ('WEEKLY_OFF',          '週休',   'REGULAR', now()),
+  ('PUBLIC_HOLIDAY_OFF',  '祝休',   'REGULAR', now()),
+  ('PLANNED_ANNUAL_LEAVE','計年',   'SPECIAL', now()),
+  ('ANNUAL_LEAVE',        '年休',   'SPECIAL', now()),
+  ('SUMMER_LEAVE',        '夏期',   'SPECIAL', now()),
+  ('WINTER_LEAVE',        '冬期',   'SPECIAL', now()),
+  ('COMPENSATORY_LEAVE',  '代休',   'SPECIAL', now()),
+  ('APPROVED_ABSENCE',    '承欠',   'SPECIAL', now()),
+  ('MATERNITY_LEAVE',     '産休',   'SPECIAL', now()),
+  ('PARENTAL_LEAVE',      '育休',   'SPECIAL', now()),
+  ('CAREGIVER_LEAVE',     '介護',   'SPECIAL', now()),
+  ('SICK_LEAVE',          '病休',   'SPECIAL', now()),
+  ('LEAVE_OF_ABSENCE',    '休職',   'SPECIAL', now()),
+  ('OTHER',               'その他', 'SPECIAL', now())
+on conflict (leave_code) do update
+set leave_name     = excluded.leave_name,
+    leave_category = excluded.leave_category,
+    updated_at     = now();
 
--- ========= SpecialAttendanceType（廃休・マル超） =========
-INSERT INTO SpecialAttendanceType
+-- ========= special_attendance_type（廃休・マル超） =========
+insert into special_attendance_type
   (attendance_code, attendance_name, holiday_work_flag, is_active, updated_at)
-VALUES
-  ('HAIKYU',  '廃休',  FALSE, TRUE, NOW()),
-  ('MARUCHO', 'マル超', FALSE, TRUE, NOW())
-ON CONFLICT (attendance_code) DO UPDATE
-SET attendance_name   = EXCLUDED.attendance_name,
-    holiday_work_flag = EXCLUDED.holiday_work_flag,
-    is_active         = EXCLUDED.is_active,
-    updated_at        = NOW();
+values
+  ('HAIKYU',  '廃休',  0, 1, now()),
+  ('MARUCHO', 'マル超', 0, 1, now())
+on conflict (attendance_code) do update
+set attendance_name   = excluded.attendance_name,
+    holiday_work_flag = excluded.holiday_work_flag,
+    is_active         = excluded.is_active,
+    updated_at        = now();
 
-COMMIT;
+commit;
 
 -- zone_code 自動採番
-CREATE SEQUENCE IF NOT EXISTS zone_code_seq;
+create sequence if not exists zone_code_seq;
 
-CREATE OR REPLACE FUNCTION gen_zone_code()
-RETURNS trigger AS $$
-BEGIN
-  IF NEW.zone_code IS NULL OR btrim(NEW.zone_code) = '' THEN
-    NEW.zone_code := 'Z' || to_char(nextval('zone_code_seq'), 'FM000000');
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+create or replace function gen_zone_code()
+returns trigger as $$
+begin
+  if new.zone_code is null or btrim(new.zone_code) = '' then
+    new.zone_code := 'Z' || to_char(nextval('zone_code_seq'), 'FM000000');
+  end if;
+  return new;
+end;
+$$ language plpgsql;
 
-DROP TRIGGER IF EXISTS trg_zone_code ON Zone;
-CREATE TRIGGER trg_zone_code
-BEFORE INSERT ON Zone
-FOR EACH ROW EXECUTE FUNCTION gen_zone_code();
-
-
--- （任意）確認クエリ
--- SELECT office_id, office_name, office_code FROM Office;
--- SELECT department_id, department_name, department_code FROM Department;
--- SELECT department_id, team_name FROM Team ORDER BY department_id, team_name;
--- SELECT job_code, job_name, start_time, end_time, work_hours, crosses_midnight FROM JobType;
--- SELECT leave_code, leave_name, leave_category FROM LeaveType;
--- SELECT attendance_code, attendance_name FROM SpecialAttendanceType;
+drop trigger if exists trg_zone_code on zone;
+create trigger trg_zone_code
+before insert on zone
+for each row execute function gen_zone_code();

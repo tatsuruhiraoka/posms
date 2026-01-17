@@ -2,9 +2,9 @@
 -- 30_views.sql
 -- 各種ビュー定義をまとめる
 
--- Zone 一覧ビュー（zone_codeを含む参照用）
-CREATE OR REPLACE VIEW v_zone_ref AS
-SELECT
+-- zone 一覧ビュー（zone_codeを含む参照用）
+create or replace view v_zone_ref as
+select
   o.office_code,
   d.department_code,
   t.team_name,
@@ -14,10 +14,8 @@ SELECT
   z.is_active,
   z.created_at,
   z.updated_at
-FROM Zone z
-JOIN Team       t ON t.team_id = z.team_id
-JOIN Department d ON d.department_id = t.department_id
-JOIN Office     o ON o.office_id = d.office_id
-ORDER BY d.department_code, t.team_name, z.zone_name;
-
-
+from zone z
+join team       t on t.team_id = z.team_id
+join department d on d.department_id = t.department_id
+join office     o on o.office_id = d.office_id
+order by d.department_code, t.team_name, z.zone_name;

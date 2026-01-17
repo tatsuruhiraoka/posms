@@ -1,0 +1,38 @@
+artifact_path: model
+flavors:
+  python_function:
+    data: model.xgb
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.xgboost
+    python_version: 3.11.13
+  xgboost:
+    code: null
+    data: model.xgb
+    model_class: xgboost.core.Booster
+    model_format: xgb
+    xgb_version: 2.0.3
+mlflow_version: 2.16.2
+model_size_bytes: 727091
+model_uuid: 21d64166fa6f4de6b5a6ba5cb4f532cd
+run_id: cdcc7e042f69478593fa5d46dee3d122
+saved_input_example_info:
+  artifact_path: input_example.json
+  pandas_orient: split
+  serving_input_path: serving_input_example.json
+  type: dataframe
+signature:
+  inputs: '[{"type": "float", "name": "dow", "required": true}, {"type": "float",
+    "name": "dow_sin", "required": true}, {"type": "float", "name": "dow_cos", "required":
+    true}, {"type": "float", "name": "is_holiday", "required": true}, {"type": "float",
+    "name": "is_after_holiday", "required": true}, {"type": "float", "name": "is_after_after_holiday",
+    "required": true}, {"type": "float", "name": "month", "required": true}, {"type":
+    "float", "name": "season", "required": true}, {"type": "float", "name": "lag_1",
+    "required": true}, {"type": "float", "name": "lag_7", "required": true}, {"type":
+    "float", "name": "rolling_mean_7", "required": true}, {"type": "float", "name":
+    "is_new_year", "required": true}, {"type": "float", "name": "is_obon", "required":
+    true}, {"type": "float", "name": "price_increase_flag", "required": true}]'
+  outputs: '[{"type": "tensor", "tensor-spec": {"dtype": "float32", "shape": [-1]}}]'
+  params: null
+utc_time_created: '2025-11-30 22:07:53.317119'
