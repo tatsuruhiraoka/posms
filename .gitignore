@@ -50,6 +50,7 @@ env/
 # ───────────── Project‑specific ─────────────
 # MLflow experiment data
 mlruns/
+mlruns_old_*/
 
 # Prefect OSS local storage
 .prefect/
