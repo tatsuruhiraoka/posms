@@ -19,42 +19,39 @@ poetry run posms forecast --office-id 1 --start 2025-09-08 --days 28
 
 # シフトだけ再最適化（分担表案）
 poetry run posms optimize --date 2025-08-01 --output-type 分担表案
+
+# 初期マスタ投入（任意：PostgreSQL環境の初期化に便利）
+poetry run posms seed-masters
 """
 
 from __future__ import annotations
 
-import os
 from datetime import date
 from pathlib import Path
+from enum import Enum
+from typing import Annotated
 
 import mlflow
 import numpy as np
 import pandas as pd
 import jpholiday
 import typer
-from sqlalchemy import create_engine, inspect, text
-from typing import Annotated, Optional
-from .db import _make_engine_from_env  # 既存ヘルパを想定
-from .exporters.excel_exporter import write_dataframe_to_excel
+from shutil import copyfile
+from sqlalchemy import inspect, text
 
-from posms.features import builder as FB
+from .exporters.excel_exporter import write_dataframe_to_excel
+from posms.utils.db import SessionManager
 from posms.features.builder import FEATURE_COLUMNS, FeatureBuilder
-try:
-    from posms.flows.monthly_flow import monthly_refresh as _monthly
-except ImportError:
-    from posms.flows.monthly_flow import monthly_train as _monthly
 from posms.models import ModelPredictor
 from posms.models.trainer import ModelTrainer
-#from posms.optimization.shift_builder import OutputType, ShiftBuilder
 
 app = typer.Typer(help="Postal Operation Shift-Management System CLI")
-#既存の try/except ～ ダミー定義を丸ごと置き換え
-from enum import Enum
 
+# 既存の try/except ～ ダミー定義を丸ごと置き換え
 try:
     from posms.optimization.shift_builder import OutputType  # 本物（あれば）
 except Exception:
-    class OutputType(str, Enum):  # Typerが扱える
+    class OutputType(str, Enum):  # Typer が扱える
         分担表 = "分担表"
         勤務指定表 = "勤務指定表"
         分担表案 = "分担表案"
@@ -65,34 +62,53 @@ def _default_template() -> Path:
     return Path("excel_templates/shift_template.xlsx")
 
 
-def _make_engine_from_env():
-    """DATABASE_URL または POSTGRES_* から DB 接続（ゼロ設定）"""
-    db_url = os.getenv("DATABASE_URL")
-    if db_url:
-        return create_engine(db_url, future=True, pool_pre_ping=True)
+def _engine():
+    """SessionManager 経由で Engine を取得（Postgres⇄SQLite 自動切替）"""
+    return SessionManager().engine
 
-    user = os.getenv("POSTGRES_USER") or os.getenv("DB_USER")
-    pwd = os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD")
-    host = os.getenv("POSTGRES_HOST", "localhost")
-    port = os.getenv("POSTGRES_PORT", "5432")
-    name = os.getenv("POSTGRES_DB") or os.getenv("DB_NAME")
-    if not all([user, pwd, name]):
-        raise RuntimeError("DB接続情報が不足：DATABASE_URL または POSTGRES_* を設定してください")
-    return create_engine(
-        f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{name}",
-        future=True,
-        pool_pre_ping=True,
-    )
+
+def _existing_tables_lower(eng) -> set[str]:
+    """接続先DBのテーブル名一覧（小文字）を返す。PostgreSQLはschema='public'を考慮。"""
+    insp = inspect(eng)
+    try:
+        if eng.dialect.name == "postgresql":
+            names = insp.get_table_names(schema="public")
+        else:
+            names = insp.get_table_names()
+    except Exception:
+        try:
+            names = insp.get_table_names()
+        except Exception:
+            names = []
+    return {str(t).lower() for t in names}
+
+
+def _has_table(eng, name: str) -> bool:
+    """方言差を吸収してテーブル存在を確認"""
+    insp = inspect(eng)
+    schema = "public" if eng.dialect.name == "postgresql" else None
+    try:
+        return insp.has_table(name, schema=schema)
+    except TypeError:
+        return insp.has_table(name)
 
 
 def _resolve_mailvolume_table(eng) -> str:
-    insp = inspect(eng)
-    existing = {t.lower() for t in insp.get_table_names(schema="public")}
+    existing = _existing_tables_lower(eng)
     if "mailvolume" in existing:
         return "mailvolume"
     if "mail_volume" in existing:
         return "mail_volume"
-    return '"MailVolume"'  # 引用付きで作成された場合
+    return '"MailVolume"'  # 引用付きで作成された場合のフォールバック
+
+
+def _resolve_jobtype_table(eng) -> str:
+    existing = _existing_tables_lower(eng)
+    if "jobtype" in existing:
+        return "jobtype"
+    if "job_type" in existing:
+        return "job_type"
+    return '"JobType"'  # 大文字作成や引用付テーブルに対応
 
 
 def _season(ts: pd.Timestamp) -> int:
@@ -100,8 +116,36 @@ def _season(ts: pd.Timestamp) -> int:
     m = ts.month
     return 1 if m in (3, 4, 5) else 2 if m in (6, 7, 8) else 3 if m in (9, 10, 11) else 4
 
+
 def _is_hol(ts: pd.Timestamp) -> int:
     return int(jpholiday.is_holiday(ts.date()))
+
+
+def _prepare_out_from_template(out: Path, template: Path) -> None:
+    """
+    out が無ければ、template (xlsm) をそのままコピーして作る。
+    既に out があれば何もしない（テンプレの分担予定表(案)やマクロを保持）。
+    """
+    out = Path(out)
+    template = Path(template)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not out.exists():
+        if not template.exists():
+            raise FileNotFoundError(f"Template not found: {template}")
+        copyfile(template, out)
+
+
+def _truthy_int(x) -> int:
+    """'○', '◯', 'true', '1', 'yes' などを 1、'×', 'false', '0', 'no' を 0 に正規化（値は厳格化対象外）"""
+    s = str(x).strip().lower()
+    if s in ("1", "true", "t", "yes", "y", "on", "○", "◯"):
+        return 1
+    if s in ("0", "false", "f", "no", "n", "off", "×"):
+        return 0
+    try:
+        return 1 if int(float(s)) != 0 else 0
+    except Exception:
+        return 0
 
 
 # ---------- Commands ----------------------------------------------
@@ -109,11 +153,7 @@ def _is_hol(ts: pd.Timestamp) -> int:
 def run_monthly(
     predict_date: Annotated[
         str,
-        typer.Option(
-            "--predict-date",
-            "-d",
-            help="YYYY-MM-DD 形式。省略時は今日。",
-        ),
+        typer.Option("--predict-date", "-d", help="YYYY-MM-DD 形式。省略時は今日。"),
     ] = "",
     output_type: Annotated[
         OutputType,
@@ -125,8 +165,7 @@ def run_monthly(
         ),
     ] = OutputType.分担表,
     excel_template: Annotated[
-        Path,
-        typer.Option("--template", "-t", help="Excel テンプレート .xlsx"),
+        Path, typer.Option("--template", "-t", help="Excel テンプレート .xlsx")
     ] = _default_template(),
 ):
     """
@@ -140,7 +179,12 @@ def run_monthly(
         "output_type": output_type.value,
         "excel_template": str(excel_template),
     }
-    _monthly(**params)  # Prefect Flow/関数を実行（refresh or train）
+    # refresh or train（モジュール側で分岐）
+    try:
+        from posms.flows.monthly_flow import monthly_refresh as _monthly
+    except ImportError:
+        from posms.flows.monthly_flow import monthly_train as _monthly
+    _monthly(**params)
 
 
 @app.command("train")
@@ -172,6 +216,7 @@ def forecast_4weeks(
     fb = FeatureBuilder(office_id=office_id)
     eng = fb.engine
     MV = _resolve_mailvolume_table(eng)
+
     if office_id is None:
         try:
             # FeatureBuilder が中で解決してくれていれば使う
@@ -208,12 +253,12 @@ def forecast_4weeks(
         for dt in targets:
             val = df_flags["price_increase_flag"].get(dt) if not df_flags.empty else None
             if isinstance(val, (bool, np.bool_)):
-            	flag = bool(val)
+                flag = bool(val)
             elif val is None or (isinstance(val, float) and np.isnan(val)):  # 欠損など
                 flag = False
             else:
-            	# 0/1 や '0'/'1' が来ても安全に解釈
-            	flag = bool(int(val))
+                # 0/1 や '0'/'1' が来ても安全に解釈
+                flag = bool(int(val))
             con.execute(
                 text(
                     f'INSERT INTO {MV} ("date", office_id, actual_volume, forecast_volume, price_increase_flag) '
@@ -289,23 +334,21 @@ def optimize_shift(
     date_str: Annotated[str, typer.Option("--date", "-d")] = str(date.today()),
     output_type: Annotated[
         OutputType,
-        typer.Option(
-            help="分担表 / 勤務指定表 / 分担表案",
-            case_sensitive=False,
-        ),
+        typer.Option(help="分担表 / 勤務指定表 / 分担表案", case_sensitive=False),
     ] = OutputType.分担表,
     template: Annotated[
-        Path,
-        typer.Option("--template", "-t", help="Excel テンプレート"),
+        Path, typer.Option("--template", "-t", help="Excel テンプレート")
     ] = _default_template(),
 ):
     from posms.optimization.shift_builder import ShiftBuilder
+
     """需要予測済みデータを入力にシフトのみ再最適化"""
     demand = FeatureBuilder().predict(date_str)  # 既定 run_id を内部でロード
     staff = FeatureBuilder().load_staff()
     out = ShiftBuilder(template).build(demand, staff, output_type)
     typer.echo(f"Excel saved → {out.resolve()}")
-    
+
+
 @app.command("export-excel")
 def export_excel(
     sql: str = typer.Option(None, "--sql", help="実行するSQL。--query-fileとどちらか必須"),
@@ -343,10 +386,10 @@ def export_excel(
                 k, v = kv.split("=", 1)
                 header_map_dict[k.strip()] = v.strip()
 
-    engine = _make_engine_from_env()  # DATABASE_URL から接続
+    engine = _engine()  # DATABASE_URL から接続
     with engine.connect() as conn:
         df = pd.read_sql(text(sql), conn)
-        
+
     if sort_by:
         cols = [c.strip() for c in sort_by.split(",") if c.strip()]
         df = df.sort_values(cols)
@@ -360,7 +403,8 @@ def export_excel(
                 df[col]
                 .astype(str)
                 .str.extract(r"(\d+)", expand=False)
-                .fillna("0").astype(int)
+                .fillna("0")
+                .astype(int)
             )
             df = df.assign(__key__=key).sort_values(["__key__", col]).drop(columns="__key__")
 
@@ -375,106 +419,424 @@ def export_excel(
     )
     typer.echo(f"✅ Exported: {out}")
 
-@app.command("export-employee-demand")
-def export_employee_demand(
-    team: Annotated[str, typer.Option("--team", "-t", help="例: 1班")],
-    out: Annotated[Path, typer.Option("--out", help="出力 .xlsx")] = Path("excel_templates/班データ.xlsx"),
-    template: Annotated[Optional[Path], typer.Option("--template", help="テンプレ .xlsx")] = Path("excel/excel_templates/shift_template.xlsx"),
-):
-    """社員別需要：
-    列= 社員番号, 氏名, <区名を横展開>, 月, 火, 水, 木, 金, 土, 日, 祝
-    値= 区列: EmployeeZoneProficiency.proficiency（無い所は0） / 曜日列: EmployeeAvailability
-    """
-    eng = _make_engine_from_env()
 
-    # --- 1) SQL を必ず先に“3つとも”定義 ---
+@app.command("export-sheet-employees")
+def export_sheet_employees(
+    department_code: str = typer.Option(..., "--department-code", "-dc", help="例: DPT-A もしくは 部署名"),
+    team: str = typer.Option(..., "--team", "-t", help="例: 1班"),
+    out: Path = typer.Option(Path("excel_out/班データ.xlsx"), "--out"),
+    sheet: str = typer.Option("社員", "--sheet"),
+    template: Path = typer.Option(None, "--template"),
+):
+    eng = _engine()
+
+    # department_code カラムの有無で WHERE を切り替え
+    insp = inspect(eng)
+    dept_cols = {c["name"] if isinstance(c, dict) else c.name for c in insp.get_columns("department")}
+    has_code = "department_code" in dept_cols
+
+    # Postgres / SQLite 共通SQL（DB依存の ORDER BY は付けない）
+    base_sql = """
+      SELECT
+          e.employee_code   AS "社員番号",
+          e.name            AS "氏名",
+          d.department_name AS "部",
+          t.team_name       AS "班",
+          COALESCE(e.employment_type,'')  AS "社員タイプ",
+          COALESCE(e.position,'')         AS "役職",
+          CASE WHEN COALESCE(e.is_leader,0)      <> 0 THEN 1 ELSE 0 END AS "班長",
+          CASE WHEN COALESCE(e.is_vice_leader,0) <> 0 THEN 1 ELSE 0 END AS "副班長",
+          CASE WHEN COALESCE(e.is_certifier,0)   <> 0 THEN 1 ELSE 0 END AS "認証司",
+          COALESCE(e.default_work_hours,0)  AS "勤務時間(日)",
+          COALESCE(e.monthly_work_hours,0)  AS "勤務時間(月)"
+      FROM employee e
+      JOIN team t ON t.team_id = e.team_id
+      JOIN department d ON d.department_id = t.department_id
+      WHERE {where_clause}
+    """
+
+    if has_code:
+        where_clause = "(COALESCE(d.department_code,'') = :dc OR d.department_name = :dc) AND t.team_name = :tn"
+    else:
+        where_clause = "d.department_name = :dc AND t.team_name = :tn"
+
+    sql = base_sql.format(where_clause=where_clause)
+
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con, params={"dc": department_code, "tn": team})
+
+    # 自然順ソート：社員番号の数字部分で並び替え（DB依存を避ける）
+    if "社員番号" in df.columns:
+        df["__num__"] = (
+            df["社員番号"].astype(str).str.extract(r"(\d+)", expand=False).fillna("999999999").astype(int)
+        )
+        df = df.sort_values(["__num__", "社員番号"]).drop(columns="__num__")
+
+    # 0/1 列は int に統一（見栄え＆型ブレ防止）
+    for c in ["班長", "副班長", "認証司", "勤務時間(日)", "勤務時間(月)"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+
+    # 出力
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(
+        df=df,
+        out_path=out,
+        sheet_name=sheet,
+        template_path=template,
+        start_cell="A1",
+        append=bool(template),
+    )
+    typer.echo(f"✅ 社員シート {len(df)}行 → {out}（{sheet}）")
+
+
+@app.command("export-sheet-zones")
+def export_sheet_zones(
+    department_code: str = typer.Option(..., "--department-code", "-dc"),
+    team: str = typer.Option(..., "--team", "-t"),
+    out: Path = typer.Option(Path("excel_out/班データ.xlsx"), "--out"),
+    sheet: str = typer.Option("区情報", "--sheet"),
+    template: Path = typer.Option(None, "--template"),
+):
+    eng = _engine()
+
+    insp = inspect(eng)
+    dept_cols = {c["name"] if isinstance(c, dict) else c.name for c in insp.get_columns("department")}
+    has_code = "department_code" in dept_cols
+
+    base_sql = """
+      SELECT
+        CAST(COALESCE(z.zone_code, 'Z' || z.zone_id) AS TEXT) AS "区コード",
+        COALESCE(z.zone_name,'')     AS "区名",
+        t.team_name                  AS "班",
+        COALESCE(z.operational_status,'通配') AS "稼働",
+        COALESCE(dem.demand_mon,0)     AS "月",
+        COALESCE(dem.demand_tue,0)     AS "火",
+        COALESCE(dem.demand_wed,0)     AS "水",
+        COALESCE(dem.demand_thu,0)     AS "木",
+        COALESCE(dem.demand_fri,0)     AS "金",
+        COALESCE(dem.demand_sat,0)     AS "土",
+        COALESCE(dem.demand_sun,0)     AS "日",
+        COALESCE(dem.demand_holiday,0) AS "祝"
+      FROM zone z
+      JOIN team t          ON t.team_id = z.team_id
+      JOIN department d    ON d.department_id = t.department_id
+      LEFT JOIN demandprofile dem ON dem.zone_id = z.zone_id
+      WHERE {where_clause}
+      ORDER BY COALESCE(z.zone_code, 'Z' || z.zone_id)
+    """
+
+    if has_code:
+        where_clause = "(COALESCE(d.department_code,'') = :dc OR d.department_name = :dc) AND t.team_name = :tn"
+    else:
+        where_clause = "d.department_name = :dc AND t.team_name = :tn"
+
+    sql = base_sql.format(where_clause=where_clause)
+
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con, params={"dc": department_code, "tn": team})
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(
+        df, out, sheet_name=sheet, template_path=template, start_cell="A1", append=bool(template)
+    )
+    typer.echo(f"✅ 区情報シート {len(df)}行 → {out}（{sheet}）")
+
+
+@app.command("export-sheet-employee-demand")
+def export_sheet_employee_demand(
+    team: str = typer.Option(..., "--team", "-t", help="例: 1班"),
+    out: Path = typer.Option(Path("excel_out/班データ.xlsx"), "--out"),
+    template: Path = typer.Option(None, "--template", help="xls/xlsx/xlsm（xlsmはマクロ温存）"),
+    sheet: str = typer.Option("社員別需要", "--sheet"),
+):
+    """
+    班ごとの『社員別需要』シートをExcelに出力:
+      列 = 社員番号, 氏名, <区名...横展開>, 月, 火, 水, 木, 金, 土, 日, 祝
+      値 = 区列: EmployeeZoneProficiency.proficiency（無い所は0） / 曜日列: 1/0
+    """
+    eng = _engine()
+
+    # 1) 班の区一覧（Postgres/SQLite 共通）
     sql_zones = """
       SELECT z.zone_id, z.zone_code, z.zone_name
-        FROM zone z JOIN team t ON z.team_id=t.team_id
+        FROM zone z
+        JOIN team t ON z.team_id = t.team_id
        WHERE t.team_name = :team
-       ORDER BY z.zone_code
+       ORDER BY COALESCE(z.zone_code, 'Z' || z.zone_id)
     """
+
+    # 2) 社員＋曜日可否（0/1 前提・DB共通 / 並びは後で pandas で自然順に）
     sql_emp = """
       SELECT e.employee_id, e.employee_code, e.name,
-         COALESCE(ea.available_mon,false) AS mon,
-         COALESCE(ea.available_tue,false) AS tue,
-         COALESCE(ea.available_wed,false) AS wed,
-         COALESCE(ea.available_thu,false) AS thu,
-         COALESCE(ea.available_fri,false) AS fri,
-         COALESCE(ea.available_sat,false) AS sat,
-         COALESCE(ea.available_sun,false) AS sun,
-         COALESCE(ea.available_hol,false) AS hol
-         FROM employee e
-         JOIN team t ON e.team_id=t.team_id
-         LEFT JOIN employeeavailability ea ON ea.employee_id=e.employee_id
-        WHERE t.team_name = :team
-        ORDER BY (regexp_replace(e.employee_code::text, '\D', '', 'g'))::int, e.employee_code
+             CASE WHEN COALESCE(ea.available_mon,  1) <> 0 THEN 1 ELSE 0 END AS mon,
+             CASE WHEN COALESCE(ea.available_tue,  1) <> 0 THEN 1 ELSE 0 END AS tue,
+             CASE WHEN COALESCE(ea.available_wed,  1) <> 0 THEN 1 ELSE 0 END AS wed,
+             CASE WHEN COALESCE(ea.available_thu,  1) <> 0 THEN 1 ELSE 0 END AS thu,
+             CASE WHEN COALESCE(ea.available_fri,  1) <> 0 THEN 1 ELSE 0 END AS fri,
+             CASE WHEN COALESCE(ea.available_sat,  0) <> 0 THEN 1 ELSE 0 END AS sat,
+             CASE WHEN COALESCE(ea.available_sun,  0) <> 0 THEN 1 ELSE 0 END AS sun,
+             CASE WHEN COALESCE(ea.available_hol,  0) <> 0 THEN 1 ELSE 0 END AS hol
+        FROM employee e
+        JOIN team t ON e.team_id = t.team_id
+   LEFT JOIN employeeavailability ea ON ea.employee_id = e.employee_id
+       WHERE t.team_name = :team
     """
-    # zone_name は後で df_z から付与する（zone_codeだけでOK）
+
+    # 3) 熟練度（社員×区）も共通
     sql_prof = """
-      SELECT ezp.employee_id, z.zone_code, COALESCE(ezp.proficiency,0) AS proficiency
+      SELECT ezp.employee_id, z.zone_name, COALESCE(ezp.proficiency, 0) AS proficiency
         FROM employeezoneproficiency ezp
-        JOIN zone z ON ezp.zone_id = z.zone_id
+        JOIN zone z ON z.zone_id = ezp.zone_id
         JOIN team t ON z.team_id = t.team_id
        WHERE t.team_name = :team
     """
 
-    # --- 2) 読み込み ---
     with eng.connect() as con:
         df_z = pd.read_sql(text(sql_zones), con, params={"team": team})
-        df_e = pd.read_sql(text(sql_emp),   con, params={"team": team})
-        df_p = pd.read_sql(text(sql_prof),  con, params={"team": team})
+        df_e = pd.read_sql(text(sql_emp), con, params={"team": team})
+        df_p = pd.read_sql(text(sql_prof), con, params={"team": team})
 
-    # 列名を小文字化（大小混在対策）
+    # 列名小文字化
     for df in (df_z, df_e, df_p):
         df.columns = [c.lower() for c in df.columns]
 
-    # --- 3) zone_name を df_p に付与（いま df_p は zone_code だけ）---
-    if "zone_name" not in df_p.columns:
-        df_p = df_p.merge(df_z[["zone_code", "zone_name"]], on="zone_code", how="left")
+    # 社員コードの“自然順”は常に pandas 側で（DB依存の正規表現等を使わない）
+    if "employee_code" in df_e.columns:
+        df_e["__num__"] = (
+            df_e["employee_code"].astype(str).str.extract(r"(\d+)", expand=False).fillna("999999999").astype(int)
+        )
+        df_e = df_e.sort_values(["__num__", "employee_code"]).drop(columns="__num__")
 
-    # --- 4) 区の横展開（pivot） ---
+    # 区名の並び（空でも列は用意）
+    zone_cols = df_z["zone_name"].dropna().astype(str).tolist()
+
+    # 熟練度を横展開
     if df_p.empty:
-        zcols = list(df_z["zone_name"])
-        wide = pd.DataFrame(columns=["employee_id"] + zcols)
+        wide = pd.DataFrame(columns=["employee_id"] + zone_cols)
     else:
         wide = (
-            df_p.pivot_table(
-                index="employee_id",
-                columns="zone_name",     # 区名で横展開
-                values="proficiency",
-                fill_value=0,
-                aggfunc="max",
-            )
+            df_p.pivot_table(index="employee_id", columns="zone_name", values="proficiency", fill_value=0, aggfunc="max")
             .reset_index()
+            .rename_axis(None, axis=1)
         )
-        zcols = [c for c in wide.columns if c != "employee_id"]
 
-    # --- 5) 社員基本と結合 → 欠損0埋め → 列順を整える ---
+    # 結合 → 欠損0埋め
     df = df_e.merge(wide, on="employee_id", how="left")
-    for c in zcols:
-        df[c] = df[c].fillna(0).astype("int64")
+    for zc in zone_cols:
+        if zc not in df.columns:
+            df[zc] = 0
+        df[zc] = pd.to_numeric(df[zc], errors="coerce").fillna(0).astype("int64")
 
-    ordered = ["employee_code", "name"] + zcols + ["mon","tue","wed","thu","fri","sat","sun","hol"]
-    # 無い列があっても KeyError にならないよう存在列でフィルタ
-    ordered = [c for c in ordered if c in df.columns]
-    df = df[ordered].rename(columns={
-        "employee_code":"社員番号", "name":"氏名",
-        "mon":"月","tue":"火","wed":"水","thu":"木","fri":"金","sat":"土","sun":"日","hol":"祝"
-    })
+    for c in ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "hol"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("int64")
 
-    # --- 6) 書き出し（同名シートを作り直し、他シートは保持） ---
-    write_dataframe_to_excel(
-        df=df,
-        out_path=out,
-        sheet_name="社員別需要",
-        template_path=template if template else None,
-        header_map=None,
-        start_cell="A1",
-        append=True,  # 既存ブックに追記/上書き
+    # 列順と日本語見出し
+    ordered = ["employee_code", "name"] + zone_cols + ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "hol"]
+    ordered = [c for c in df.columns if c in ordered]  # 安全化
+    df = df[ordered].rename(
+        columns={
+            "employee_code": "社員番号",
+            "name": "氏名",
+            "mon": "月",
+            "tue": "火",
+            "wed": "水",
+            "thu": "木",
+            "fri": "金",
+            "sat": "土",
+            "sun": "日",
+            "hol": "祝",
+        }
     )
-    typer.echo(f"✅ 社員別需要 → {out}")
+
+    # 出力
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(
+        df=df, out_path=out, sheet_name=sheet, template_path=template, start_cell="A1", append=bool(template) or out.exists()
+    )
+    typer.echo(f"✅ 社員別需要シート {len(df)}行 → {out}（{sheet}）")
+
+
+@app.command("export-sheet-jobtypes-regular")
+def export_sheet_jobtypes_regular(
+    out: Path = typer.Option(Path("excel_out/班データ統合.xlsx"), "--out"),
+    template: Path = typer.Option(None, "--template"),
+    sheet: str = typer.Option("勤務種別(正社員)", "--sheet"),
+):
+    eng = _engine()
+    JT = _resolve_jobtype_table(eng)
+    sql = f"""
+      SELECT job_name  AS "勤務名",
+             start_time AS "就労開始時間",
+             end_time   AS "就労終了時間",
+             work_hours AS "勤務時間"
+        FROM {JT}
+       WHERE lower(COALESCE(classification,'')) IN ('reg','regular','fulltime','正社員')
+       ORDER BY start_time, job_name;
+    """
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(
+        df, out, sheet_name=sheet, template_path=template, start_cell="A1", append=bool(template) or out.exists()
+    )
+    typer.echo(f"✅ 勤務種別(正社員) {len(df)}行 → {out}（{sheet}）")
+
+
+@app.command("export-sheet-jobtypes-fixedterm")
+def export_sheet_jobtypes_fixedterm(
+    out: Path = typer.Option(Path("excel_out/班データ統合.xlsx"), "--out"),
+    template: Path = typer.Option(None, "--template"),
+    sheet: str = typer.Option("勤務種別(期間雇用)", "--sheet"),
+):
+    eng = _engine()
+    JT = _resolve_jobtype_table(eng)
+    sql = f"""
+      SELECT job_name  AS "勤務名",
+             start_time AS "就労開始時間",
+             end_time   AS "就労終了時間",
+             work_hours AS "勤務時間"
+        FROM {JT}
+       WHERE lower(COALESCE(classification,'')) IN ('contract','part-time','pt','temp','dispatch','期間雇用社員')
+       ORDER BY start_time, job_name;
+    """
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(
+        df, out, sheet_name=sheet, template_path=template, start_cell="A1", append=bool(template) or out.exists()
+    )
+    typer.echo(f"✅ 勤務種別(期間雇用) {len(df)}行 → {out}（{sheet}）")
     
+@app.command("export-sheet-leavetypes")
+def export_sheet_leavetypes(
+    out: Path = typer.Option(Path("excel_out/班データ統合.xlsx"), "--out"),
+    template: Path = typer.Option(None, "--template"),
+    sheet: str = typer.Option("休暇種類", "--sheet"),
+):
+    eng = _engine()
+    sql = """
+      SELECT
+        leave_name     AS "休暇名",
+        leave_code     AS "休暇コード",
+        leave_category AS "休暇種類"
+      FROM leavetype
+      ORDER BY leave_category, leave_code, leave_name
+    """
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(
+        df, out, sheet_name=sheet, template_path=template,
+        start_cell="A1", append=bool(template) or out.exists()
+    )
+    typer.echo(f"✅ 休暇種類 {len(df)}行 → {out}（{sheet}）")
+    
+@app.command("export-sheet-special-attendance")
+def export_sheet_special_attendance(
+    out: Path = typer.Option(Path("excel_out/班データ統合.xlsx"), "--out"),
+    template: Path = typer.Option(None, "--template"),
+    sheet: str = typer.Option("特殊区分", "--sheet"),
+):
+    eng = _engine()
+    sql = """
+      SELECT
+        attendance_name   AS "区分名",
+        attendance_code   AS "区分コード",
+        holiday_work_flag AS "休日勤務",
+        is_active         AS "有効"
+      FROM special_attendance_type
+      WHERE COALESCE(is_active, 1) <> 0
+      ORDER BY attendance_code, attendance_name
+    """
+    with eng.connect() as con:
+        df = pd.read_sql(text(sql), con)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_dataframe_to_excel(
+        df, out, sheet_name=sheet, template_path=template,
+        start_cell="A1", append=bool(template) or out.exists()
+    )
+    typer.echo(f"✅ 特殊区分 {len(df)}行 → {out}（{sheet}）")
+
+
+import os
+from pathlib import Path
+from typing import Annotated
+
+@app.command("export-team-workbook")
+def export_team_workbook(
+    department_code: str = typer.Option(..., "--department-code", "-dc", help="例: DPT-A"),
+    team: str = typer.Option(..., "--team", "-t", help="班名（例: 1班）"),
+    out: Path = typer.Option(Path("excel_templates/班統合データ.xlsm"), "--out", help="出力先 .xlsm"),
+    template: Path = typer.Option(
+        Path("excel_templates/分担予定表(案).xlsm"),
+        "--template",
+        help="テンプレート（xlsmを指定すればマクロ保持。分担予定表(案)が入っていること）",
+    ),
+    # ▼ 復活: 後方互換用
+    db_url: Annotated[str | None, typer.Option("--db-url")] = None,
+    sqlite: Annotated[Path | None, typer.Option("--sqlite", help="sqlite DB ファイルパス")] = None,
+    plan_sheet_name: Annotated[str, typer.Option("--plan-sheet-name", help="テンプレ内のシート名確認用")] = "分担予定表(案)",
+):
+    """
+    部署・班ごとの Excel ブックをテンプレ込みで統合出力。
+    シート構成（テンプレ保持）：
+      - 分担予定表(案)
+      - 社員 / 区情報 / 社員別需要 / 正社員服務表 / 期間雇用社員服務表
+    """
+    # ▼ 後方互換: DB 接続を明示指定できるように
+    if sqlite is not None:
+        os.environ["DATABASE_URL"] = f"sqlite:///{Path(sqlite).resolve()}"
+    elif db_url:
+        os.environ["DATABASE_URL"] = db_url
+
+    typer.echo(f"▶ 班「{team}」の統合Excelを作成中...")
+
+    _prepare_out_from_template(out, template)
+    typer.echo(f"  - テンプレ基盤: {template} → {out}")
+
+    # （任意）テンプレ検証はそのまま…
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(out, keep_vba=True, read_only=True)
+        if plan_sheet_name not in wb.sheetnames:
+            typer.secho(f"WARNING: 出力ブックに '{plan_sheet_name}' シートが見つかりません。テンプレの確認をしてください。", err=True)
+        wb.close()
+    except Exception:
+        pass
+
+    # 以降は既存どおり：社員 / 区情報 / 社員別需要 / 服務表 を out に追記
+    export_sheet_employees(department_code=department_code, team=team, out=out, sheet="社員", template=out)
+    export_sheet_zones(department_code=department_code, team=team, out=out, sheet="区情報", template=out)
+    export_sheet_employee_demand(team=team, out=out, template=out, sheet="社員別需要")
+    export_sheet_jobtypes_regular(out=out, template=out, sheet="正社員服務表")
+    export_sheet_jobtypes_fixedterm(out=out, template=out, sheet="期間雇用社員服務表")
+        # 6️⃣ 休暇種類（非表示で差し込む）
+    export_sheet_leavetypes(out=out, template=out, sheet="休暇種類")
+
+    # 7️⃣ 特殊区分（非表示で差し込む）
+    export_sheet_special_attendance(out=out, template=out, sheet="特殊区分")
+
+    # 仕上げ：休暇種類・特殊区分シートを VeryHidden に
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(out, keep_vba=True)
+        for s in ("休暇種類", "特殊区分"):
+            if s in wb.sheetnames:
+                ws = wb[s]
+                # openpyxl では 'veryHidden' を指定
+                ws.sheet_state = "veryHidden"
+        wb.save(out)
+        wb.close()
+    except Exception as e:
+        # 非致命（隠せなくてもブックは使える）
+            typer.secho(f"NOTE: 非表示化に失敗: {e}", err=True)
+
+    typer.echo(f"✅ 統合完了: {out.resolve()}")
+
 @app.command("import-excel")
 def import_excel(
     file: Path = typer.Option(..., "--file", exists=True, help="編集済みの班ファイル .xlsx")
@@ -484,14 +846,16 @@ def import_excel(
     - C) 社員: employee（部/班マスタも補完）
     - B) 区情報: zone → demandprofile
     - A) 社員別需要: employeeavailability / employeezoneproficiency
+    - D) 休暇種類: leavetype（シート名: 休暇種類 / 列: 休暇コード, 休暇名, 休暇種類）※シートが無ければスキップ
+    - E) 特殊区分: special_attendance_type（シート名: 特殊区分 / 列: 区分コード, 区分名, 休日勤務, 有効）※シートが無ければスキップ
     """
-    eng = _make_engine_from_env()
-
+    eng = _engine()
     # 一度だけオープンして使い回す
     xls = pd.ExcelFile(file)
 
     # ファイル名から班名を推定（例: 1班データ.xlsx → 1班）
     import re
+
     m = re.search(r"(\d+)班", file.name)
     team_name = f"{m.group(1)}班" if m else None
 
@@ -503,19 +867,21 @@ def import_excel(
 
         # ---------- C) 社員（employee を社員番号で更新/追加） ----------
         if "社員" in xls.sheet_names:
-            df_emp = pd.read_excel(xls, sheet_name="社員").rename(columns={
-                "社員番号": "employee_code",
-                "氏名": "name",
-                "部": "department_name",
-                "班": "team_name",
-                "社員タイプ": "employment_type",
-                "役職": "position",
-                "班長": "is_leader",
-                "副班長": "is_vice_leader",
-                "認証司": "is_certifier",
-                "勤務時間(日)": "default_work_hours",
-                "勤務時間(月)": "monthly_work_hours",
-            })
+            df_emp = pd.read_excel(xls, sheet_name="社員").rename(
+                columns={
+                    "社員番号": "employee_code",
+                    "氏名": "name",
+                    "部": "department_name",
+                    "班": "team_name",
+                    "社員タイプ": "employment_type",
+                    "役職": "position",
+                    "班長": "is_leader",
+                    "副班長": "is_vice_leader",
+                    "認証司": "is_certifier",
+                    "勤務時間(日)": "default_work_hours",
+                    "勤務時間(月)": "monthly_work_hours",
+                }
+            )
 
             # 前処理：空→空文字、左右スペース除去
             for c in ["department_name", "team_name"]:
@@ -524,43 +890,31 @@ def import_excel(
 
             # 1) department / team を補完（無ければ作る）
             dep_names = sorted({n for n in df_emp.get("department_name", []).tolist() if n})
-            team_pairs = sorted({
-                (r["department_name"], r["team_name"])
-                for _, r in df_emp[["department_name", "team_name"]].iterrows()
-                if str(r.get("team_name", "")).strip()
-            })
+            team_pairs = sorted(
+                {
+                    (r["department_name"], r["team_name"])
+                    for _, r in df_emp[["department_name", "team_name"]].iterrows()
+                    if str(r.get("team_name", "")).strip()
+                }
+            )
 
             # department を name で upsert
             for dn in dep_names:
-                dep_id = con.execute(text(
-                    "SELECT department_id FROM department WHERE department_name=:dn"
-                ), {"dn": dn}).scalar_one_or_none()
+                dep_id = con.execute(text("SELECT department_id FROM department WHERE department_name=:dn"), {"dn": dn}).scalar_one_or_none()
                 if dep_id is None:
-                    con.execute(text(
-                        "INSERT INTO department (department_name) VALUES (:dn)"
-                    ), {"dn": dn})
+                    con.execute(text("INSERT INTO department (department_name) VALUES (:dn)"), {"dn": dn})
 
             # team を (team_name, department) で upsert
             for dn, tn in team_pairs:
                 dep_id = None
                 if dn:
-                    dep_id = con.execute(text(
-                        "SELECT department_id FROM department WHERE department_name=:dn"
-                    ), {"dn": dn}).scalar_one_or_none()
+                    dep_id = con.execute(text("SELECT department_id FROM department WHERE department_name=:dn"), {"dn": dn}).scalar_one_or_none()
                     if dep_id is None:
-                        con.execute(text(
-                            "INSERT INTO department (department_name) VALUES (:dn)"
-                        ), {"dn": dn})
-                        dep_id = con.execute(text(
-                            "SELECT department_id FROM department WHERE department_name=:dn"
-                        ), {"dn": dn}).scalar_one()
-                team_id = con.execute(text(
-                    "SELECT team_id FROM team WHERE team_name=:tn"
-                ), {"tn": tn}).scalar_one_or_none()
+                        con.execute(text("INSERT INTO department (department_name) VALUES (:dn)"), {"dn": dn})
+                        dep_id = con.execute(text("SELECT department_id FROM department WHERE department_name=:dn"), {"dn": dn}).scalar_one()
+                team_id = con.execute(text("SELECT team_id FROM team WHERE team_name=:tn"), {"tn": tn}).scalar_one_or_none()
                 if team_id is None:
-                    con.execute(text(
-                        "INSERT INTO team (team_name, department_id) VALUES (:tn, :did)"
-                    ), {"tn": tn, "did": dep_id})
+                    con.execute(text("INSERT INTO team (team_name, department_id) VALUES (:tn, :did)"), {"tn": tn, "did": dep_id})
 
             # 最新の team マップ
             teams = pd.read_sql(text("SELECT team_id, team_name FROM team"), con)
@@ -601,7 +955,9 @@ def import_excel(
                     "team_id": team_id,
                 }
 
-                con.execute(text("""
+                con.execute(
+                    text(
+                        """
                     INSERT INTO employee (
                         employee_code, name, employment_type, position,
                         is_leader, is_vice_leader, is_certifier,
@@ -624,18 +980,29 @@ def import_excel(
                       monthly_work_hours = EXCLUDED.monthly_work_hours,
                       team_id            = COALESCE(EXCLUDED.team_id, employee.team_id),
                       updated_at         = CURRENT_TIMESTAMP
-                """), payload)
+                """
+                    ),
+                    payload,
+                )
 
         # ---------- B) 区情報（zone を補完 → demandprofile） ----------
         if "区情報" in xls.sheet_names:
-            dfz = pd.read_excel(xls, sheet_name="区情報").rename(columns={
-                "区コード": "zone_code",
-                "区名": "zone_name",
-                "班": "team_name",
-                "稼働": "operational_status",
-                "月": "mon", "火": "tue", "水": "wed", "木": "thu",
-                "金": "fri", "土": "sat", "日": "sun", "祝": "holiday",
-            })
+            dfz = pd.read_excel(xls, sheet_name="区情報").rename(
+                columns={
+                    "区コード": "zone_code",
+                    "区名": "zone_name",
+                    "班": "team_name",
+                    "稼働": "operational_status",
+                    "月": "mon",
+                    "火": "tue",
+                    "水": "wed",
+                    "木": "thu",
+                    "金": "fri",
+                    "土": "sat",
+                    "日": "sun",
+                    "祝": "holiday",
+                }
+            )
             # 前処理
             for c in ["team_name", "zone_code", "zone_name", "operational_status"]:
                 if c in dfz.columns:
@@ -643,38 +1010,54 @@ def import_excel(
 
             # team 補完
             for tn in sorted({t for t in dfz.get("team_name", []).tolist() if t}):
-                tid = con.execute(text("SELECT team_id FROM team WHERE team_name=:tn"),
-                                  {"tn": tn}).scalar_one_or_none()
+                tid = con.execute(text("SELECT team_id FROM team WHERE team_name=:tn"), {"tn": tn}).scalar_one_or_none()
                 if tid is None:
                     con.execute(text("INSERT INTO team (team_name) VALUES (:tn)"), {"tn": tn})
 
             # zone 補完（zone_code が一意ならそれで、無ければ (team_id, zone_name) で近似）
             for _, r in dfz.iterrows():
-                tn = r.get("team_name"); zc = r.get("zone_code"); zn = r.get("zone_name"); op = r.get("operational_status")
+                tn = r.get("team_name")
+                zc = r.get("zone_code")
+                zn = r.get("zone_name")
+                op = r.get("operational_status")
                 if not tn:
                     continue
                 tid = con.execute(text("SELECT team_id FROM team WHERE team_name=:tn"), {"tn": tn}).scalar_one_or_none()
                 if not tid:
                     continue
                 if zc:
-                    zid = con.execute(text("SELECT zone_id FROM zone WHERE zone_code=:zc"),
-                                      {"zc": zc}).scalar_one_or_none()
+                    zid = con.execute(text("SELECT zone_id FROM zone WHERE zone_code=:zc"), {"zc": zc}).scalar_one_or_none()
                     if zid is None:
-                        con.execute(text("""
+                        con.execute(
+                            text(
+                                """
                             INSERT INTO zone (team_id, zone_code, zone_name, operational_status)
                             VALUES (:tid,:zc,:zn,:op)
-                        """), {"tid": tid, "zc": zc, "zn": zn, "op": op})
+                        """
+                            ),
+                            {"tid": tid, "zc": zc, "zn": zn, "op": op},
+                        )
                 else:
-                    zid = con.execute(text("""
+                    zid = con.execute(
+                        text(
+                            """
                         SELECT z.zone_id FROM zone z
                          JOIN team t ON t.team_id = z.team_id
                         WHERE t.team_name = :tn AND z.zone_name = :zn
-                    """), {"tn": tn, "zn": zn}).scalar_one_or_none()
+                    """
+                        ),
+                        {"tn": tn, "zn": zn},
+                    ).scalar_one_or_none()
                     if zid is None:
-                        con.execute(text("""
+                        con.execute(
+                            text(
+                                """
                             INSERT INTO zone (team_id, zone_name, operational_status)
                             VALUES (:tid,:zn,:op)
-                        """), {"tid": tid, "zn": zn, "op": op})
+                        """
+                            ),
+                            {"tid": tid, "zn": zn, "op": op},
+                        )
 
             # 最新の zone マップ（code優先）
             zones2 = pd.read_sql(text("SELECT zone_id, zone_code, zone_name, team_id FROM zone"), con)
@@ -692,8 +1075,7 @@ def import_excel(
                 if zc:
                     zid = zmap_code.get(zc)
                 if zid is None and tn and zn:
-                    tid = con.execute(text("SELECT team_id FROM team WHERE team_name=:tn"),
-                                      {"tn": tn}).scalar_one_or_none()
+                    tid = con.execute(text("SELECT team_id FROM team WHERE team_name=:tn"), {"tn": tn}).scalar_one_or_none()
                     if tid:
                         key = f"{tid}||{zn}"
                         zid = zmap_name.get(key)
@@ -711,7 +1093,9 @@ def import_excel(
                     "sun": int(r.get("sun", 0) or 0),
                     "hol": int(r.get("holiday", 0) or 0),
                 }
-                con.execute(text("""
+                con.execute(
+                    text(
+                        """
                     INSERT INTO demandprofile
                       (zone_id, demand_mon, demand_tue, demand_wed, demand_thu,
                        demand_fri, demand_sat, demand_sun, demand_holiday)
@@ -725,17 +1109,28 @@ def import_excel(
                       demand_sat=EXCLUDED.demand_sat,
                       demand_sun=EXCLUDED.demand_sun,
                       demand_holiday=EXCLUDED.demand_holiday
-                """), payload)
+                """
+                    ),
+                    payload,
+                )
 
         # ---------- A) 社員別需要（availability / proficiency） ----------
         if "社員別需要" in xls.sheet_names:
-            df = pd.read_excel(xls, sheet_name="社員別需要").rename(columns={
-                "社員番号": "employee_code",
-                "氏名": "name",
-                "月": "mon", "火": "tue", "水": "wed", "木": "thu",
-                "金": "fri", "土": "sat", "日": "sun", "祝": "hol"
-            })
-            fixed = {"employee_code","name","mon","tue","wed","thu","fri","sat","sun","hol"}
+            df = pd.read_excel(xls, sheet_name="社員別需要").rename(
+                columns={
+                    "社員番号": "employee_code",
+                    "氏名": "name",
+                    "月": "mon",
+                    "火": "tue",
+                    "水": "wed",
+                    "木": "thu",
+                    "金": "fri",
+                    "土": "sat",
+                    "日": "sun",
+                    "祝": "hol",
+                }
+            )
+            fixed = {"employee_code", "name", "mon", "tue", "wed", "thu", "fri", "sat", "sun", "hol"}
             zone_name_cols = [c for c in df.columns if c not in fixed]
 
             # employee map
@@ -743,20 +1138,27 @@ def import_excel(
             emap = emp.set_index("employee_code")["employee_id"].astype(int).to_dict()
 
             # zone map（名前→id・班を考慮）
-            zones = pd.read_sql(text("""
+            zones = pd.read_sql(
+                text(
+                    """
                 SELECT z.zone_id, z.zone_name, t.team_name
                   FROM zone z JOIN team t ON z.team_id=t.team_id
-            """), con)
+            """
+                ),
+                con,
+            )
             zmap = zones.set_index(["team_name", "zone_name"])["zone_id"].astype(int).to_dict()
 
             # availability
-            if all(c in df.columns for c in ["mon","tue","wed","thu","fri","sat","sun","hol"]):
+            if all(c in df.columns for c in ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "hol"]):
                 for _, r in df.iterrows():
                     eid = emap.get(str(r.get("employee_code")))
                     if eid is None:
                         continue
-                    vals = {c: bool(r.get(c)) for c in ["mon","tue","wed","thu","fri","sat","sun","hol"]}
-                    con.execute(text("""
+                    vals = {c: bool(r.get(c)) for c in ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "hol"]}
+                    con.execute(
+                        text(
+                            """
                         INSERT INTO employeeavailability
                           (employee_id, available_mon, available_tue, available_wed, available_thu,
                            available_fri, available_sat, available_sun, available_hol)
@@ -770,7 +1172,10 @@ def import_excel(
                           available_sat=EXCLUDED.available_sat,
                           available_sun=EXCLUDED.available_sun,
                           available_hol=EXCLUDED.available_hol
-                    """), {"eid": int(eid), **vals})
+                    """
+                        ),
+                        {"eid": int(eid), **vals},
+                    )
 
             # proficiency（区名ごと）
             for _, r in df.iterrows():
@@ -784,11 +1189,112 @@ def import_excel(
                     zid = zmap.get((team_name, str(zn))) if team_name else None
                     if zid is None:
                         continue
-                    con.execute(text("""
+                    con.execute(
+                        text(
+                            """
                         INSERT INTO employeezoneproficiency (employee_id, zone_id, proficiency)
                         VALUES (:eid,:zid,:p)
                         ON CONFLICT (employee_id, zone_id) DO UPDATE SET proficiency=EXCLUDED.proficiency
-                    """), {"eid": int(eid), "zid": int(zid), "p": int(v)})
+                    """
+                        ),
+                        {"eid": int(eid), "zid": int(zid), "p": int(v)},
+                    )
+
+        # ---------- D) 休暇種類（厳格：シート名・列名を固定。無ければスキップ） ----------
+        if _has_table(eng, "leavetype") and "休暇種類" in xls.sheet_names:
+            df_raw = pd.read_excel(xls, sheet_name="休暇種類")
+            expected = ["休暇コード", "休暇名", "休暇種類"]
+            missing = [c for c in expected if c not in df_raw.columns]
+            if missing:
+                raise ValueError(f"休暇種類シートに必須列がありません: {missing}（想定: {expected}）")
+
+            df_lt = (
+                df_raw.rename(
+                    columns={
+                        "休暇コード": "leave_code",
+                        "休暇名": "leave_name",
+                        "休暇種類": "leave_category",
+                    }
+                )[["leave_code", "leave_name", "leave_category"]]
+                .copy()
+            )
+
+            for c in ["leave_code", "leave_name", "leave_category"]:
+                df_lt[c] = df_lt[c].astype(str).str.strip()
+
+            df_lt = df_lt[df_lt["leave_code"] != ""]
+
+            up_cnt = 0
+            for _, r in df_lt.iterrows():
+                con.execute(
+                    text(
+                        """
+                    INSERT INTO leavetype (leave_code, leave_name, leave_category, updated_at)
+                    VALUES (:code, :name, :cat, CURRENT_TIMESTAMP)
+                    ON CONFLICT (leave_code) DO UPDATE SET
+                      leave_name     = EXCLUDED.leave_name,
+                      leave_category = EXCLUDED.leave_category,
+                      updated_at     = CURRENT_TIMESTAMP
+                """
+                    ),
+                    {"code": r.leave_code, "name": r.leave_name, "cat": r.leave_category},
+                )
+                up_cnt += 1
+            typer.echo(f"✅ 休暇種類 {up_cnt}行を取り込み（休暇種類）")
+
+        # ---------- E) 特殊区分（厳格：シート名・列名を固定。無ければスキップ） ----------
+        if _has_table(eng, "special_attendance_type") and "特殊区分" in xls.sheet_names:
+            df_raw = pd.read_excel(xls, sheet_name="特殊区分")
+            expected = ["区分コード", "区分名", "休日勤務", "有効"]
+            missing = [c for c in expected if c not in df_raw.columns]
+            if missing:
+                raise ValueError(f"特殊区分シートに必須列がありません: {missing}（想定: {expected}）")
+
+            df_sat = (
+                df_raw.rename(
+                    columns={
+                        "区分コード": "attendance_code",
+                        "区分名": "attendance_name",
+                        "休日勤務": "holiday_work_flag",
+                        "有効": "is_active",
+                    }
+                )[["attendance_code", "attendance_name", "holiday_work_flag", "is_active"]]
+                .copy()
+            )
+
+            for c in ["attendance_code", "attendance_name"]:
+                df_sat[c] = df_sat[c].astype(str).str.strip()
+
+            # 値の正規化（0/1 以外の表記をクリップ） — 列名の厳格さとは独立
+            df_sat["holiday_work_flag"] = df_sat["holiday_work_flag"].map(_truthy_int).fillna(0).astype(int)
+            df_sat["is_active"] = df_sat["is_active"].map(_truthy_int).fillna(1).astype(int)
+
+            df_sat = df_sat[df_sat["attendance_code"] != ""]
+
+            up_cnt = 0
+            for _, r in df_sat.iterrows():
+                con.execute(
+                    text(
+                        """
+                    INSERT INTO special_attendance_type
+                      (attendance_code, attendance_name, holiday_work_flag, is_active, updated_at)
+                    VALUES (:code, :name, :hol, :act, CURRENT_TIMESTAMP)
+                    ON CONFLICT (attendance_code) DO UPDATE SET
+                      attendance_name   = EXCLUDED.attendance_name,
+                      holiday_work_flag = EXCLUDED.holiday_work_flag,
+                      is_active         = EXCLUDED.is_active,
+                      updated_at        = CURRENT_TIMESTAMP
+                """
+                    ),
+                    {
+                        "code": str(r.attendance_code),
+                        "name": str(r.attendance_name),
+                        "hol": int(r.holiday_work_flag),
+                        "act": int(r.is_active),
+                    },
+                )
+                up_cnt += 1
+            typer.echo(f"✅ 特殊区分 {up_cnt}行を取り込み（特殊区分）")
 
     typer.echo(f"✅ Imported to DB from: {file}")
 
