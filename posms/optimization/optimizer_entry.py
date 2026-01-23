@@ -108,5 +108,6 @@ def main() -> int:
     print(f"OK: wrote summary.json -> {outdir}")
     return 0
 
+
 if __name__ == "__main__":
     raise SystemExit(main())

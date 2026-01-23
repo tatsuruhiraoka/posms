@@ -713,7 +713,7 @@ class ShiftBuilderGrid:
         assert model is not None
 
         # ★ここは「数式の形」を守るために残す
-        I = self.employees # noqa: E741
+        I = self.employees  # noqa: E741
         D = self.days
         K = self.jobs
         R = self.rest_types
@@ -997,7 +997,7 @@ class ShiftBuilderGrid:
         model = self.model
         assert model is not None
         # ★ここは「数式の形」を守るために残す
-        I, D, W = self.employees, self.days, self.week # noqa: E741
+        I, D, W = self.employees, self.days, self.week  # noqa: E741
         req = self.req
         priority_map = self.priority_map
         missing = self.missing
@@ -1066,7 +1066,7 @@ class ShiftBuilderGrid:
         形式: emp_no, date, assigned_zone, time(upper), lower_kind(休暇/特別/業務) など
         ※ Excelに戻すための最低限の形にする。
         """
-        I = self.employees # noqa: E741
+        I = self.employees  # noqa: E741
         D = self.days
         K = self.jobs
         R = self.rest_types
