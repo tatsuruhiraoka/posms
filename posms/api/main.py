@@ -13,7 +13,9 @@ from sqlalchemy import create_engine, text
 from fastapi import Query
 
 import jpholiday  # 祝日判定（ローカル）
-import tempfile, subprocess, sys, traceback
+import tempfile
+import subprocess
+import sys
 
 # 1) app を先に作る
 app = FastAPI(title="posms-api", docs_url="/docs", redoc_url=None)
@@ -77,6 +79,7 @@ def calendar_csv(start: str):
         content=("﻿" + csv_text).encode("utf-8"),  # ← 先頭の"﻿"は UTF-8 BOM
         media_type="text/csv; charset=utf-8",
     )
+
 
 # ---- ヘルスチェック：DB が無くても 200 を返し、状態をフィールドで伝える ----
 @app.get("/health")
@@ -250,8 +253,10 @@ def export_employees_csv(
 
     csv_bytes = ("\ufeff" + buf.getvalue()).encode("utf-16le")
     return Response(content=csv_bytes, media_type="text/csv; charset=utf-16")
-    
+
+
 # === team/employees.csv（自然キー：department_code or department_name と team_name） ===
+
 
 def _has_col(conn, table: str, column: str) -> bool:
     q = text("""
@@ -262,6 +267,7 @@ def _has_col(conn, table: str, column: str) -> bool:
     """)
     return conn.execute(q, {"t": table, "c": column}).scalar() is not None
 
+
 def _csv_utf8_bom(filename: str, headers: list[str], rows: list[list]) -> Response:
     buf = io.StringIO(newline="")
     w = csv.writer(buf, lineterminator="\r\n")
@@ -270,8 +276,9 @@ def _csv_utf8_bom(filename: str, headers: list[str], rows: list[list]) -> Respon
     return Response(
         content="\ufeff" + buf.getvalue(),
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
 
 @app.get("/team/employees.csv")
 def team_employees_csv(
@@ -280,11 +287,19 @@ def team_employees_csv(
     department_name: str | None = Query(None, description="部署名（どちらか片方）"),
 ):
     if not (department_code or department_name):
-        raise HTTPException(400, "department_code か department_name のどちらかを指定してください")
+        raise HTTPException(
+            400, "department_code か department_name のどちらかを指定してください"
+        )
 
     headers = [
-        "employee_code","name","employment_type","position",
-        "default_work_hours","monthly_work_hours","is_certifier","row_version"
+        "employee_code",
+        "name",
+        "employment_type",
+        "position",
+        "default_work_hours",
+        "monthly_work_hours",
+        "is_certifier",
+        "row_version",
     ]
 
     with get_engine().connect() as conn:
@@ -292,22 +307,33 @@ def team_employees_csv(
         team_id = None
         if department_code:
             if not _has_col(conn, "department", "department_code"):
-                raise HTTPException(400, "department.department_code が存在しません。department_name を指定してください。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400,
+                    "department.department_code が存在しません。department_name を指定してください。",
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_code = :dc and t.team_name = :tn
-            """), {"dc": department_code, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dc": department_code, "tn": team_name},
+            ).scalar_one_or_none()
         else:
             if not _has_col(conn, "department", "department_name"):
-                raise HTTPException(400, "department.department_name 列が見つかりません。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400, "department.department_name 列が見つかりません。"
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_name = :dn and t.team_name = :tn
-            """), {"dn": department_name, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dn": department_name, "tn": team_name},
+            ).scalar_one_or_none()
 
         if team_id is None:
             raise HTTPException(404, "team not found")
@@ -335,8 +361,11 @@ def team_employees_csv(
             data = [list(r) + [0] for r in rows]  # row_version が無い場合は 0 で埋める
 
     return _csv_utf8_bom("employees.csv", headers, data)
+
+
 # ==============================================================================
 # === team/availability.csv（自然キー：department_code または department_name + team_name） ===
+
 
 def _has_table(conn, table: str) -> bool:
     q = text("""
@@ -345,10 +374,12 @@ def _has_table(conn, table: str) -> bool:
     """)
     return conn.execute(q, {"t": table}).scalar() is not None
 
+
 # 既に _has_col / _csv_utf8_bom が無い環境向けの保険（employees.csvパッチ未適用時）
 try:
     _has_col  # type: ignore
 except NameError:
+
     def _has_col(conn, table: str, column: str) -> bool:
         q = text("""
             select 1 from information_schema.columns
@@ -356,9 +387,11 @@ except NameError:
         """)
         return conn.execute(q, {"t": table, "c": column}).scalar() is not None
 
+
 try:
     _csv_utf8_bom  # type: ignore
 except NameError:
+
     def _csv_utf8_bom(filename: str, headers: list[str], rows: list[list]) -> Response:
         buf = io.StringIO(newline="")
         w = csv.writer(buf, lineterminator="\r\n")
@@ -367,8 +400,9 @@ except NameError:
         return Response(
             content="\ufeff" + buf.getvalue(),
             media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
 
 @app.get("/team/availability.csv")
 def team_availability_csv(
@@ -377,12 +411,20 @@ def team_availability_csv(
     department_name: str | None = Query(None, description="部署名（どちらか片方）"),
 ):
     if not (department_code or department_name):
-        raise HTTPException(400, "department_code か department_name のどちらかを指定してください")
+        raise HTTPException(
+            400, "department_code か department_name のどちらかを指定してください"
+        )
 
     headers = [
         "employee_code",
-        "available_mon","available_tue","available_wed","available_thu",
-        "available_fri","available_sat","available_sun","available_hol",
+        "available_mon",
+        "available_tue",
+        "available_wed",
+        "available_thu",
+        "available_fri",
+        "available_sat",
+        "available_sun",
+        "available_hol",
         "row_version",
     ]
 
@@ -390,22 +432,33 @@ def team_availability_csv(
         # --- チーム特定（department_code が無ければ department_name で特定） ---
         if department_code:
             if not _has_col(conn, "department", "department_code"):
-                raise HTTPException(400, "department.department_code が存在しません。department_name を指定してください。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400,
+                    "department.department_code が存在しません。department_name を指定してください。",
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_code = :dc and t.team_name = :tn
-            """), {"dc": department_code, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dc": department_code, "tn": team_name},
+            ).scalar_one_or_none()
         else:
             if not _has_col(conn, "department", "department_name"):
-                raise HTTPException(400, "department.department_name 列が見つかりません。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400, "department.department_name 列が見つかりません。"
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_name = :dn and t.team_name = :tn
-            """), {"dn": department_name, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dn": department_name, "tn": team_name},
+            ).scalar_one_or_none()
 
         if team_id is None:
             raise HTTPException(404, "team not found")
@@ -433,18 +486,23 @@ def team_availability_csv(
             data = [list(r) for r in rows]
         else:
             # availability テーブルが無い場合でも、外形を固定して返す
-            emp_rows = conn.execute(text("""
+            emp_rows = conn.execute(
+                text("""
                 select e.employee_code
                   from employee e
                  where e.team_id = :tid
                  order by e.employee_code
-            """), {"tid": team_id}).all()
+            """),
+                {"tid": team_id},
+            ).all()
             data = [
                 [r[0], True, True, True, True, True, True, True, True, 0]
                 for r in emp_rows
             ]
 
     return _csv_utf8_bom("availability.csv", headers, data)
+
+
 # ==============================================================================
 # === team/zones_demand.csv（Zone + DemandProfile 統合）========================
 @app.get("/team/zones_demand.csv")
@@ -454,12 +512,22 @@ def team_zones_demand_csv(
     department_name: str | None = Query(None, description="部署名（どちらか片方）"),
 ):
     if not (department_code or department_name):
-        raise HTTPException(400, "department_code か department_name のどちらかを指定してください")
+        raise HTTPException(
+            400, "department_code か department_name のどちらかを指定してください"
+        )
 
     headers = [
-        "zone_code","zone_name","operational_status",
-        "demand_mon","demand_tue","demand_wed","demand_thu",
-        "demand_fri","demand_sat","demand_sun","demand_holiday",
+        "zone_code",
+        "zone_name",
+        "operational_status",
+        "demand_mon",
+        "demand_tue",
+        "demand_wed",
+        "demand_thu",
+        "demand_fri",
+        "demand_sat",
+        "demand_sun",
+        "demand_holiday",
         "row_version",
     ]
 
@@ -473,22 +541,33 @@ def team_zones_demand_csv(
         # --- team_id 特定 ---
         if department_code:
             if not _has_col(conn, "department", "department_code"):
-                raise HTTPException(400, "department.department_code が存在しません。department_name を指定してください。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400,
+                    "department.department_code が存在しません。department_name を指定してください。",
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_code = :dc and t.team_name = :tn
-            """), {"dc": department_code, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dc": department_code, "tn": team_name},
+            ).scalar_one_or_none()
         else:
             if not _has_col(conn, "department", "department_name"):
-                raise HTTPException(400, "department.department_name 列が見つかりません。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400, "department.department_name 列が見つかりません。"
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_name = :dn and t.team_name = :tn
-            """), {"dn": department_name, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dn": department_name, "tn": team_name},
+            ).scalar_one_or_none()
 
         if team_id is None:
             raise HTTPException(404, "team not found")
@@ -498,12 +577,26 @@ def team_zones_demand_csv(
             return _csv_utf8_bom("zones_demand.csv", headers, [])
 
         # zone 列の表現
-        zone_code_expr = "z.zone_code as zone_code" if _has_col(conn, "zone", "zone_code") else "cast(z.zone_id as text) as zone_code"
-        zone_name_expr = "z.zone_name as zone_name" if _has_col(conn, "zone", "zone_name") else "'' as zone_name"
-        oper_expr      = "z.operational_status as operational_status" if _has_col(conn, "zone", "operational_status") else "'active' as operational_status"
+        zone_code_expr = (
+            "z.zone_code as zone_code"
+            if _has_col(conn, "zone", "zone_code")
+            else "cast(z.zone_id as text) as zone_code"
+        )
+        zone_name_expr = (
+            "z.zone_name as zone_name"
+            if _has_col(conn, "zone", "zone_name")
+            else "'' as zone_name"
+        )
+        oper_expr = (
+            "z.operational_status as operational_status"
+            if _has_col(conn, "zone", "operational_status")
+            else "'active' as operational_status"
+        )
 
         # --- demand テーブル名の差に対応 ---
-        dp_table = _first_existing_table(conn, ["demand_profile", "demandprofile", "zone_demand"])
+        dp_table = _first_existing_table(
+            conn, ["demand_profile", "demandprofile", "zone_demand"]
+        )
         dp_exists = dp_table is not None
 
         def dp_expr(col: str, as_name: str | None = None) -> str:
@@ -526,34 +619,46 @@ def team_zones_demand_csv(
         else:
             hol_expr = "0 as demand_holiday"
 
-        rv_expr = "coalesce(d.row_version, 0) as row_version" if (dp_exists and _has_col(conn, dp_table, "row_version")) else "0 as row_version"
+        rv_expr = (
+            "coalesce(d.row_version, 0) as row_version"
+            if (dp_exists and _has_col(conn, dp_table, "row_version"))
+            else "0 as row_version"
+        )
 
-        select_list = ", ".join([
-            zone_code_expr,
-            zone_name_expr,
-            oper_expr,
-            dp_expr("demand_mon"),
-            dp_expr("demand_tue"),
-            dp_expr("demand_wed"),
-            dp_expr("demand_thu"),
-            dp_expr("demand_fri"),
-            dp_expr("demand_sat"),
-            dp_expr("demand_sun"),
-            hol_expr,
-            rv_expr,
-        ])
+        select_list = ", ".join(
+            [
+                zone_code_expr,
+                zone_name_expr,
+                oper_expr,
+                dp_expr("demand_mon"),
+                dp_expr("demand_tue"),
+                dp_expr("demand_wed"),
+                dp_expr("demand_thu"),
+                dp_expr("demand_fri"),
+                dp_expr("demand_sat"),
+                dp_expr("demand_sun"),
+                hol_expr,
+                rv_expr,
+            ]
+        )
 
         # --- 結合は列が揃う場合のみ ---
         join_clause = ""
         if dp_exists:
-            if _has_col(conn, dp_table, "zone_id") and _has_col(conn, "zone", "zone_id"):
+            if _has_col(conn, dp_table, "zone_id") and _has_col(
+                conn, "zone", "zone_id"
+            ):
                 join_clause = f"left join {dp_table} d on d.zone_id = z.zone_id"
-            elif _has_col(conn, dp_table, "zone_code") and _has_col(conn, "zone", "zone_code"):
+            elif _has_col(conn, dp_table, "zone_code") and _has_col(
+                conn, "zone", "zone_code"
+            ):
                 join_clause = f"left join {dp_table} d on d.zone_code = z.zone_code"
             else:
                 join_clause = ""  # キーが無ければJOINしない（すべて0で返す）
 
-        order_key = "z.zone_code" if _has_col(conn, "zone", "zone_code") else "z.zone_id"
+        order_key = (
+            "z.zone_code" if _has_col(conn, "zone", "zone_code") else "z.zone_id"
+        )
 
         sql = f"""
             select {select_list}
@@ -566,6 +671,8 @@ def team_zones_demand_csv(
         data = [list(r) for r in rows]
 
     return _csv_utf8_bom("zones_demand.csv", headers, data)
+
+
 # =============================================================================
 # === team/proficiency.csv（employee_code, zone_code, proficiency, row_version） ===
 @app.get("/team/proficiency.csv")
@@ -575,41 +682,11 @@ def team_proficiency_csv(
     department_name: str | None = Query(None, description="部署名（どちらか片方）"),
 ):
     if not (department_code or department_name):
-        raise HTTPException(400, "department_code か department_name のどちらかを指定してください")
+        raise HTTPException(
+            400, "department_code か department_name のどちらかを指定してください"
+        )
 
     headers = ["employee_code", "zone_code", "proficiency", "row_version"]
-
-    # 補助: 既存の関数が無い環境への保険
-    try:
-        _has_table  # type: ignore
-    except NameError:
-        def _has_table(conn, table: str) -> bool:
-            q = text("select 1 from information_schema.tables where table_name = :t limit 1")
-            return conn.execute(q, {"t": table}).scalar() is not None
-
-    try:
-        _has_col  # type: ignore
-    except NameError:
-        def _has_col(conn, table: str, column: str) -> bool:
-            q = text("""
-                select 1 from information_schema.columns
-                 where table_name = :t and column_name = :c limit 1
-            """)
-            return conn.execute(q, {"t": table, "c": column}).scalar() is not None
-
-    try:
-        _csv_utf8_bom  # type: ignore
-    except NameError:
-        def _csv_utf8_bom(filename: str, headers: list[str], rows: list[list]) -> Response:
-            buf = io.StringIO(newline="")
-            w = csv.writer(buf, lineterminator="\r\n")
-            w.writerow(headers)
-            w.writerows(rows)
-            return Response(
-                content="\ufeff" + buf.getvalue(),
-                media_type="text/csv; charset=utf-8",
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-            )
 
     def _first_existing_table(conn, names: list[str]) -> str | None:
         for n in names:
@@ -621,22 +698,33 @@ def team_proficiency_csv(
         # --- team_id 特定 ---
         if department_code:
             if not _has_col(conn, "department", "department_code"):
-                raise HTTPException(400, "department.department_code が存在しません。department_name を指定してください。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400,
+                    "department.department_code が存在しません。department_name を指定してください。",
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_code = :dc and t.team_name = :tn
-            """), {"dc": department_code, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dc": department_code, "tn": team_name},
+            ).scalar_one_or_none()
         else:
             if not _has_col(conn, "department", "department_name"):
-                raise HTTPException(400, "department.department_name 列が見つかりません。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400, "department.department_name 列が見つかりません。"
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_name = :dn and t.team_name = :tn
-            """), {"dn": department_name, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dn": department_name, "tn": team_name},
+            ).scalar_one_or_none()
 
         if team_id is None:
             raise HTTPException(404, "team not found")
@@ -646,17 +734,23 @@ def team_proficiency_csv(
             return _csv_utf8_bom("proficiency.csv", headers, [])
 
         # --- プロフィシエンシのテーブル名ゆれに対応 ---
-        prof_table = _first_existing_table(conn, [
-            "employee_zone_proficiency", "employeezoneproficiency",
-            "proficiency", "emp_zone_prof", "skill_matrix"
-        ])
+        prof_table = _first_existing_table(
+            conn,
+            [
+                "employee_zone_proficiency",
+                "employeezoneproficiency",
+                "proficiency",
+                "emp_zone_prof",
+                "skill_matrix",
+            ],
+        )
         if not prof_table:
             # テーブル未作成なら外形だけ（空）を返す
             return _csv_utf8_bom("proficiency.csv", headers, [])
 
         # 列ゆれ: 値, キー
         # 値: proficiency / level / skill / proficiency_level
-        if   _has_col(conn, prof_table, "proficiency"):
+        if _has_col(conn, prof_table, "proficiency"):
             prof_val = "coalesce(p.proficiency, 0) as proficiency"
         elif _has_col(conn, prof_table, "level"):
             prof_val = "coalesce(p.level, 0) as proficiency"
@@ -668,30 +762,50 @@ def team_proficiency_csv(
             prof_val = "0 as proficiency"
 
         # row_version
-        rv_expr = "coalesce(p.row_version, 0) as row_version" if _has_col(conn, prof_table, "row_version") else "0 as row_version"
+        rv_expr = (
+            "coalesce(p.row_version, 0) as row_version"
+            if _has_col(conn, prof_table, "row_version")
+            else "0 as row_version"
+        )
 
         # employee 結合
-        if   _has_col(conn, prof_table, "employee_id") and _has_col(conn, "employee", "employee_id"):
+        if _has_col(conn, prof_table, "employee_id") and _has_col(
+            conn, "employee", "employee_id"
+        ):
             join_emp = "p.employee_id = e.employee_id"
-        elif _has_col(conn, prof_table, "employee_code") and _has_col(conn, "employee", "employee_code"):
+        elif _has_col(conn, prof_table, "employee_code") and _has_col(
+            conn, "employee", "employee_code"
+        ):
             join_emp = "p.employee_code = e.employee_code"
         else:
             # キーが合わなければ空を返す
             return _csv_utf8_bom("proficiency.csv", headers, [])
 
         # zone 結合
-        if   _has_col(conn, prof_table, "zone_id") and _has_col(conn, "zone", "zone_id"):
+        if _has_col(conn, prof_table, "zone_id") and _has_col(conn, "zone", "zone_id"):
             join_zone = "p.zone_id = z.zone_id"
-        elif _has_col(conn, prof_table, "zone_code") and _has_col(conn, "zone", "zone_code"):
+        elif _has_col(conn, prof_table, "zone_code") and _has_col(
+            conn, "zone", "zone_code"
+        ):
             join_zone = "p.zone_code = z.zone_code"
         else:
             return _csv_utf8_bom("proficiency.csv", headers, [])
 
         # 表示列（自然キー出力）
-        zone_code_expr = "z.zone_code as zone_code" if _has_col(conn, "zone", "zone_code") else "cast(z.zone_id as text) as zone_code"
+        zone_code_expr = (
+            "z.zone_code as zone_code"
+            if _has_col(conn, "zone", "zone_code")
+            else "cast(z.zone_id as text) as zone_code"
+        )
 
-        order_emp = "e.employee_code" if _has_col(conn, "employee", "employee_code") else "e.employee_id"
-        order_zone = "z.zone_code" if _has_col(conn, "zone", "zone_code") else "z.zone_id"
+        order_emp = (
+            "e.employee_code"
+            if _has_col(conn, "employee", "employee_code")
+            else "e.employee_id"
+        )
+        order_zone = (
+            "z.zone_code" if _has_col(conn, "zone", "zone_code") else "z.zone_id"
+        )
 
         sql = f"""
             select e.employee_code as employee_code,
@@ -708,6 +822,8 @@ def team_proficiency_csv(
         data = [list(r) for r in rows]
 
     return _csv_utf8_bom("proficiency.csv", headers, data)
+
+
 # ==============================================================================
 # === team/employees_jp.csv（日本語ヘッダ：社員コード ほか） ====================
 @app.get("/team/employees_jp.csv")
@@ -717,30 +833,52 @@ def team_employees_jp_csv(
     department_name: str | None = Query(None, description="部署名（どちらか片方）"),
 ):
     if not (department_code or department_name):
-        raise HTTPException(400, "department_code か department_name のどちらかを指定してください")
+        raise HTTPException(
+            400, "department_code か department_name のどちらかを指定してください"
+        )
 
-    HEADERS_JP = ["社員番号","氏名","社員タイプ","役職","勤務時間(日)","勤務時間(月)","認証司","row_version"]
+    HEADERS_JP = [
+        "社員番号",
+        "氏名",
+        "社員タイプ",
+        "役職",
+        "勤務時間(日)",
+        "勤務時間(月)",
+        "認証司",
+        "row_version",
+    ]
 
     with get_engine().connect() as conn:
         # 班IDの特定（department_code優先、無ければdepartment_name）
         if department_code:
             if not _has_col(conn, "department", "department_code"):
-                raise HTTPException(400, "department.department_code が存在しません。department_name を指定してください。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400,
+                    "department.department_code が存在しません。department_name を指定してください。",
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_code = :dc and t.team_name = :tn
-            """), {"dc": department_code, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dc": department_code, "tn": team_name},
+            ).scalar_one_or_none()
         else:
             if not _has_col(conn, "department", "department_name"):
-                raise HTTPException(400, "department.department_name 列が見つかりません。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400, "department.department_name 列が見つかりません。"
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_name = :dn and t.team_name = :tn
-            """), {"dn": department_name, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dn": department_name, "tn": team_name},
+            ).scalar_one_or_none()
 
         if team_id is None:
             raise HTTPException(404, "team not found")
@@ -748,25 +886,33 @@ def team_employees_jp_csv(
         # row_version の有無で分岐（無ければ 0 埋め）
         has_row_version = _has_col(conn, "employee", "row_version")
         if has_row_version:
-            rows = conn.execute(text("""
+            rows = conn.execute(
+                text("""
                 select e.employee_code, e.name, e.employment_type, e.position,
                        e.default_work_hours, e.monthly_work_hours, e.is_certifier, e.row_version
                   from employee e
                  where e.team_id = :tid
                  order by e.employee_code
-            """), {"tid": team_id}).all()
+            """),
+                {"tid": team_id},
+            ).all()
             data = [list(r) for r in rows]
         else:
-            rows = conn.execute(text("""
+            rows = conn.execute(
+                text("""
                 select e.employee_code, e.name, e.employment_type, e.position,
                        e.default_work_hours, e.monthly_work_hours, e.is_certifier
                   from employee e
                  where e.team_id = :tid
                  order by e.employee_code
-            """), {"tid": team_id}).all()
+            """),
+                {"tid": team_id},
+            ).all()
             data = [list(r) + [0] for r in rows]
 
     return _csv_utf8_bom("employees_jp.csv", HEADERS_JP, data)
+
+
 # ==============================================================================
 # === team/availability_jp.csv（日本語ヘッダ版） ================================
 @app.get("/team/availability_jp.csv")
@@ -776,30 +922,54 @@ def team_availability_jp_csv(
     department_name: str | None = Query(None, description="部署名（どちらか片方）"),
 ):
     if not (department_code or department_name):
-        raise HTTPException(400, "department_code か department_name のどちらかを指定してください")
+        raise HTTPException(
+            400, "department_code か department_name のどちらかを指定してください"
+        )
 
-    HEADERS_JP = ["社員番号","月","火","水","木","金","土","日","祝","row_version"]
+    HEADERS_JP = [
+        "社員番号",
+        "月",
+        "火",
+        "水",
+        "木",
+        "金",
+        "土",
+        "日",
+        "祝",
+        "row_version",
+    ]
 
     with get_engine().connect() as conn:
         # --- チーム特定 ---
         if department_code:
             if not _has_col(conn, "department", "department_code"):
-                raise HTTPException(400, "department.department_code が存在しません。department_name を指定してください。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400,
+                    "department.department_code が存在しません。department_name を指定してください。",
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_code = :dc and t.team_name = :tn
-            """), {"dc": department_code, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dc": department_code, "tn": team_name},
+            ).scalar_one_or_none()
         else:
             if not _has_col(conn, "department", "department_name"):
-                raise HTTPException(400, "department.department_name 列が見つかりません。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400, "department.department_name 列が見つかりません。"
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_name = :dn and t.team_name = :tn
-            """), {"dn": department_name, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dn": department_name, "tn": team_name},
+            ).scalar_one_or_none()
 
         if team_id is None:
             raise HTTPException(404, "team not found")
@@ -811,13 +981,19 @@ def team_availability_jp_csv(
                     return n
             return None
 
-        av_table = _first_existing_table(["employee_availability", "employeeavailability"])
+        av_table = _first_existing_table(
+            ["employee_availability", "employeeavailability"]
+        )
 
         if av_table:
             # JOINキー自動判別（employee_id 優先、なければ employee_code）
-            if _has_col(conn, av_table, "employee_id") and _has_col(conn, "employee", "employee_id"):
+            if _has_col(conn, av_table, "employee_id") and _has_col(
+                conn, "employee", "employee_id"
+            ):
                 join_key = "av.employee_id = e.employee_id"
-            elif _has_col(conn, av_table, "employee_code") and _has_col(conn, "employee", "employee_code"):
+            elif _has_col(conn, av_table, "employee_code") and _has_col(
+                conn, "employee", "employee_code"
+            ):
                 join_key = "av.employee_code = e.employee_code"
             else:
                 join_key = None
@@ -847,15 +1023,23 @@ def team_availability_jp_csv(
             data = [list(r) for r in rows]
         else:
             # テーブル無し／キー不一致 → 外形固定（平日TRUE／土日祝FALSE, row_version=0）
-            emp_rows = conn.execute(text("""
+            emp_rows = conn.execute(
+                text("""
                 select e.employee_code
                   from employee e
                  where e.team_id = :tid
                  order by e.employee_code
-            """), {"tid": team_id}).all()
-            data = [[r[0], True, True, True, True, True, False, False, False, 0] for r in emp_rows]
+            """),
+                {"tid": team_id},
+            ).all()
+            data = [
+                [r[0], True, True, True, True, True, False, False, False, 0]
+                for r in emp_rows
+            ]
 
     return _csv_utf8_bom("availability_jp.csv", HEADERS_JP, data)
+
+
 # ==============================================================================
 # === team/zones_demand_jp.csv（日本語ヘッダ：区, 業務状態, 月..祝, row_version） ===
 @app.get("/team/zones_demand_jp.csv")
@@ -865,30 +1049,55 @@ def team_zones_demand_jp_csv(
     department_name: str | None = Query(None, description="部署名（どちらか片方）"),
 ):
     if not (department_code or department_name):
-        raise HTTPException(400, "department_code か department_name のどちらかを指定してください")
+        raise HTTPException(
+            400, "department_code か department_name のどちらかを指定してください"
+        )
 
-    HEADERS_JP = ["区","業務状態","月","火","水","木","金","土","日","祝","row_version"]
+    HEADERS_JP = [
+        "区",
+        "業務状態",
+        "月",
+        "火",
+        "水",
+        "木",
+        "金",
+        "土",
+        "日",
+        "祝",
+        "row_version",
+    ]
 
     with get_engine().connect() as conn:
         # --- team_id 特定 ---
         if department_code:
             if not _has_col(conn, "department", "department_code"):
-                raise HTTPException(400, "department.department_code が存在しません。department_name を指定してください。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400,
+                    "department.department_code が存在しません。department_name を指定してください。",
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_code = :dc and t.team_name = :tn
-            """), {"dc": department_code, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dc": department_code, "tn": team_name},
+            ).scalar_one_or_none()
         else:
             if not _has_col(conn, "department", "department_name"):
-                raise HTTPException(400, "department.department_name 列が見つかりません。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400, "department.department_name 列が見つかりません。"
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_name = :dn and t.team_name = :tn
-            """), {"dn": department_name, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dn": department_name, "tn": team_name},
+            ).scalar_one_or_none()
 
         if team_id is None:
             raise HTTPException(404, "team not found")
@@ -916,10 +1125,16 @@ def team_zones_demand_jp_csv(
             order_key = "z.zone_id"
 
         # 業務状態（無ければ空文字）
-        oper_jp = "z.operational_status as 業務状態" if _has_col(conn, "zone", "operational_status") else "'' as 業務状態"
+        oper_jp = (
+            "z.operational_status as 業務状態"
+            if _has_col(conn, "zone", "operational_status")
+            else "'' as 業務状態"
+        )
 
         # demand テーブル（demand_profile / demandprofile / zone_demand）
-        dp_table = _first_existing_table(["demand_profile", "demandprofile", "zone_demand"])
+        dp_table = _first_existing_table(
+            ["demand_profile", "demandprofile", "zone_demand"]
+        )
         dp_exists = dp_table is not None
 
         def dp_expr(col: str, alias: str) -> str:
@@ -941,28 +1156,38 @@ def team_zones_demand_jp_csv(
         else:
             hol_expr = "0 as 祝"
 
-        rv_expr = "coalesce(d.row_version, 0) as row_version" if (dp_exists and _has_col(conn, dp_table, "row_version")) else "0 as row_version"
+        rv_expr = (
+            "coalesce(d.row_version, 0) as row_version"
+            if (dp_exists and _has_col(conn, dp_table, "row_version"))
+            else "0 as row_version"
+        )
 
-        select_list = ", ".join([
-            zone_jp,
-            oper_jp,
-            dp_expr("demand_mon", "月"),
-            dp_expr("demand_tue", "火"),
-            dp_expr("demand_wed", "水"),
-            dp_expr("demand_thu", "木"),
-            dp_expr("demand_fri", "金"),
-            dp_expr("demand_sat", "土"),
-            dp_expr("demand_sun", "日"),
-            hol_expr,
-            rv_expr,
-        ])
+        select_list = ", ".join(
+            [
+                zone_jp,
+                oper_jp,
+                dp_expr("demand_mon", "月"),
+                dp_expr("demand_tue", "火"),
+                dp_expr("demand_wed", "水"),
+                dp_expr("demand_thu", "木"),
+                dp_expr("demand_fri", "金"),
+                dp_expr("demand_sat", "土"),
+                dp_expr("demand_sun", "日"),
+                hol_expr,
+                rv_expr,
+            ]
+        )
 
         # 結合は列が揃う場合のみ
         join_clause = ""
         if dp_exists:
-            if _has_col(conn, dp_table, "zone_id") and _has_col(conn, "zone", "zone_id"):
+            if _has_col(conn, dp_table, "zone_id") and _has_col(
+                conn, "zone", "zone_id"
+            ):
                 join_clause = f"left join {dp_table} d on d.zone_id = z.zone_id"
-            elif _has_col(conn, dp_table, "zone_code") and _has_col(conn, "zone", "zone_code"):
+            elif _has_col(conn, dp_table, "zone_code") and _has_col(
+                conn, "zone", "zone_code"
+            ):
                 join_clause = f"left join {dp_table} d on d.zone_code = z.zone_code"
 
         sql = f"""
@@ -976,6 +1201,8 @@ def team_zones_demand_jp_csv(
         data = [list(r) for r in rows]
 
     return _csv_utf8_bom("zones_demand_jp.csv", HEADERS_JP, data)
+
+
 # ==============================================================================
 # 置き換え版: /team/proficiency_jp.csv（社員番号, 区, 優先順位, row_version）
 @app.get("/team/proficiency_jp.csv")
@@ -985,7 +1212,9 @@ def team_proficiency_jp_csv(
     department_name: str | None = Query(None, description="部署名（どちらか片方）"),
 ):
     if not (department_code or department_name):
-        raise HTTPException(400, "department_code か department_name のどちらかを指定してください")
+        raise HTTPException(
+            400, "department_code か department_name のどちらかを指定してください"
+        )
 
     HEADERS_JP = ["社員番号", "区", "優先順位", "row_version"]
 
@@ -993,22 +1222,33 @@ def team_proficiency_jp_csv(
         # --- team_id 特定 ---
         if department_code:
             if not _has_col(conn, "department", "department_code"):
-                raise HTTPException(400, "department.department_code が存在しません。department_name を指定してください。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400,
+                    "department.department_code が存在しません。department_name を指定してください。",
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_code = :dc and t.team_name = :tn
-            """), {"dc": department_code, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dc": department_code, "tn": team_name},
+            ).scalar_one_or_none()
         else:
             if not _has_col(conn, "department", "department_name"):
-                raise HTTPException(400, "department.department_name 列が見つかりません。")
-            team_id = conn.execute(text("""
+                raise HTTPException(
+                    400, "department.department_name 列が見つかりません。"
+                )
+            team_id = conn.execute(
+                text("""
                 select t.team_id
                   from team t
                   join department d on d.department_id = t.department_id
                  where d.department_name = :dn and t.team_name = :tn
-            """), {"dn": department_name, "tn": team_name}).scalar_one_or_none()
+            """),
+                {"dn": department_name, "tn": team_name},
+            ).scalar_one_or_none()
 
         if team_id is None:
             raise HTTPException(404, "team not found")
@@ -1024,20 +1264,34 @@ def team_proficiency_jp_csv(
                     return n
             return None
 
-        prof_table = _first_existing_table([
-            "employee_zone_proficiency", "employeezoneproficiency",
-            "proficiency", "emp_zone_prof", "skill_matrix",
-            "employee_zone_priority", "employeezonepriority", "preference", "zone_preference"
-        ])
+        prof_table = _first_existing_table(
+            [
+                "employee_zone_proficiency",
+                "employeezoneproficiency",
+                "proficiency",
+                "emp_zone_prof",
+                "skill_matrix",
+                "employee_zone_priority",
+                "employeezonepriority",
+                "preference",
+                "zone_preference",
+            ]
+        )
         if not prof_table:
             return _csv_utf8_bom("proficiency_jp.csv", HEADERS_JP, [])
 
         # 値カラムのゆれを優先順位で吸収（なければ proficiency → 最後は 0）
         def priority_expr() -> str:
             candidates = [
-                "priority", "priority_rank", "priority_order",
-                "rank", "rank_no",
-                "preference", "preference_rank", "preference_order", "pref_order",
+                "priority",
+                "priority_rank",
+                "priority_order",
+                "rank",
+                "rank_no",
+                "preference",
+                "preference_rank",
+                "preference_order",
+                "pref_order",
             ]
             for c in candidates:
                 if _has_col(conn, prof_table, c):
@@ -1047,19 +1301,29 @@ def team_proficiency_jp_csv(
                 return "coalesce(p.proficiency, 0) as 優先順位"
             return "0 as 優先順位"
 
-        rv_expr = "coalesce(p.row_version, 0) as row_version" if _has_col(conn, prof_table, "row_version") else "0 as row_version"
+        rv_expr = (
+            "coalesce(p.row_version, 0) as row_version"
+            if _has_col(conn, prof_table, "row_version")
+            else "0 as row_version"
+        )
 
         # JOINキー（employee / zone）
-        if   _has_col(conn, prof_table, "employee_id") and _has_col(conn, "employee", "employee_id"):
+        if _has_col(conn, prof_table, "employee_id") and _has_col(
+            conn, "employee", "employee_id"
+        ):
             join_emp = "p.employee_id = e.employee_id"
-        elif _has_col(conn, prof_table, "employee_code") and _has_col(conn, "employee", "employee_code"):
+        elif _has_col(conn, prof_table, "employee_code") and _has_col(
+            conn, "employee", "employee_code"
+        ):
             join_emp = "p.employee_code = e.employee_code"
         else:
             return _csv_utf8_bom("proficiency_jp.csv", HEADERS_JP, [])
 
-        if   _has_col(conn, prof_table, "zone_id") and _has_col(conn, "zone", "zone_id"):
+        if _has_col(conn, prof_table, "zone_id") and _has_col(conn, "zone", "zone_id"):
             join_zone = "p.zone_id = z.zone_id"
-        elif _has_col(conn, prof_table, "zone_code") and _has_col(conn, "zone", "zone_code"):
+        elif _has_col(conn, prof_table, "zone_code") and _has_col(
+            conn, "zone", "zone_code"
+        ):
             join_zone = "p.zone_code = z.zone_code"
         else:
             return _csv_utf8_bom("proficiency_jp.csv", HEADERS_JP, [])
@@ -1075,7 +1339,11 @@ def team_proficiency_jp_csv(
             zone_disp = "cast(z.zone_id as text) as 区"
             order_zone = "z.zone_id"
 
-        order_emp = "e.employee_code" if _has_col(conn, "employee", "employee_code") else "e.employee_id"
+        order_emp = (
+            "e.employee_code"
+            if _has_col(conn, "employee", "employee_code")
+            else "e.employee_id"
+        )
 
         sql = f"""
             select e.employee_code as 社員番号,
@@ -1092,7 +1360,8 @@ def team_proficiency_jp_csv(
         data = [list(r) for r in rows]
 
     return _csv_utf8_bom("proficiency_jp.csv", HEADERS_JP, data)
-    
+
+
 # Excelの「更新」ボタンから送られてくる xlsm/xlsx を取り込み（既存 CLI を呼ぶ）
 @app.post("/import")
 async def import_xlsx(req: Request):
@@ -1108,12 +1377,16 @@ async def import_xlsx(req: Request):
         cp = subprocess.run(cmd, capture_output=True, text=True)
         if cp.returncode == 0:
             return JSONResponse({"ok": True})
-        return JSONResponse({"ok": False, "stderr": cp.stderr.strip(), "stdout": cp.stdout.strip()}, status_code=500)
+        return JSONResponse(
+            {"ok": False, "stderr": cp.stderr.strip(), "stdout": cp.stdout.strip()},
+            status_code=500,
+        )
     finally:
         try:
             os.unlink(tmp)
         except Exception:
             pass
+
 
 # ローカル開発用: `python -m posms.api.main`
 if __name__ == "__main__":

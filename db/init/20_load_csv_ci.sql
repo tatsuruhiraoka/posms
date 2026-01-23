@@ -18,6 +18,7 @@ set datestyle to 'ISO, YMD';
 
 -- （オプション）完全ワイプしたい場合だけ -v wipe=1 を付けて実行
 \if :{?wipe}
+\if :wipe = 1
 truncate table
   employeeavailability,
   employeezoneproficiency,
@@ -29,6 +30,10 @@ truncate table
   holiday
 restart identity cascade;
 \endif
+\endif
+
+-- seed（office/department/team/leavetype/special_attendance_type + zone_code trigger）
+\i db/init/10_seed_masters.sql
 
 -- 本番と同じローダーを呼び出す（ステージング→UPSERT なので外部キーも安全）
 \i db/init/20_load_csv.sql

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional
 
 import mlflow
 import mlflow.xgboost  # noqa: F401  # モデル保存に利用
@@ -318,7 +318,11 @@ class ModelTrainer:
                     imp_dict = booster.get_score(importance_type="gain")
                     # DataFrame から作った DMatrix なら列名が入る想定
                     cols = list(Xf.columns)
-                    imp = pd.Series({c: imp_dict.get(c, 0.0) for c in cols}).sort_values(ascending=False).head(30)
+                    imp = (
+                        pd.Series({c: imp_dict.get(c, 0.0) for c in cols})
+                        .sort_values(ascending=False)
+                        .head(30)
+                    )
                     fig = plt.figure(figsize=(6.2, 6.8))
                     ax = fig.add_subplot(111)
                     imp[::-1].plot(kind="barh", ax=ax)
@@ -356,7 +360,10 @@ class ModelTrainer:
                 y_example = self._predict_booster(booster, d_example, used_rounds)
                 sig = infer_signature(X_example, y_example)
                 mlflow.xgboost.log_model(  # Booster をそのまま保存
-                    booster, artifact_path="model", signature=sig, input_example=X_example
+                    booster,
+                    artifact_path="model",
+                    signature=sig,
+                    input_example=X_example,
                 )
             except Exception:
                 # 署名取得に失敗した場合は素朴に保存
@@ -407,7 +414,9 @@ class ModelTrainer:
     # Internals
     # ----------------------------------------------------------------
     @staticmethod
-    def _to_xgb_params(params: Dict[str, Any], *, log_safe: bool = False) -> Dict[str, Any]:
+    def _to_xgb_params(
+        params: Dict[str, Any], *, log_safe: bool = False
+    ) -> Dict[str, Any]:
         """
         sklearn 互換パラメータを xgb.train 用に変換。
         log_safe=True の場合は学習に無関係なキーを落として見やすく整形。
@@ -425,15 +434,26 @@ class ModelTrainer:
         if log_safe:
             # ログ用に順序・冗長削減（任意）
             keys = [
-                "objective", "eta", "max_depth", "subsample", "colsample_bytree",
-                "gamma", "min_child_weight", "alpha", "lambda",
-                "tree_method", "eval_metric", "seed",
+                "objective",
+                "eta",
+                "max_depth",
+                "subsample",
+                "colsample_bytree",
+                "gamma",
+                "min_child_weight",
+                "alpha",
+                "lambda",
+                "tree_method",
+                "eval_metric",
+                "seed",
             ]
             return {k: p[k] for k in keys if k in p}
         return p
 
     @staticmethod
-    def _predict_booster(booster: xgb.Booster, dmat: xgb.DMatrix, used_rounds: int) -> np.ndarray:
+    def _predict_booster(
+        booster: xgb.Booster, dmat: xgb.DMatrix, used_rounds: int
+    ) -> np.ndarray:
         """
         xgboost のバージョン差を吸収して、best_iteration までで予測。
         """

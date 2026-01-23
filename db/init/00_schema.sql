@@ -151,6 +151,7 @@ create table employeezoneproficiency (
 -- 各社員の出勤可能な曜日
 create table employeeavailability (
   employee_id int primary key references employee(employee_id),
+
   available_mon int not null default 1,
   available_tue int not null default 1,
   available_wed int not null default 1,
@@ -158,7 +159,16 @@ create table employeeavailability (
   available_fri int not null default 1,
   available_sat int not null default 0,
   available_sun int not null default 0,
-  available_hol int not null default 0
+  available_hol int not null default 0,
+
+  -- シフト種別可否
+  available_early     int not null,  -- 早番
+  available_day       int not null,  -- 日勤
+  available_mid       int not null,  -- 中勤
+  available_night     int not null,  -- 夜勤
+  available_night_sat int not null,  -- 夜勤(土)
+  available_night_sun int not null,  -- 夜勤(日)
+  available_night_hol int not null   -- 夜勤(祝)
 );
 
 create table if not exists holiday (
