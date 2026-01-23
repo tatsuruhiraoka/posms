@@ -47,6 +47,7 @@ class ShiftBuilderGrid:
       - A/B/C は意味が伝わらないので「説明的な名前」に置換（ロジック不変）
       - 旧Excel版の「予測に基づく priority 調整」を復活（priority_map を補正）
     """
+
     csv_dir: Path
 
     # 予測CSV（任意）。None の場合は csv_dir 内を自動探索。
@@ -60,19 +61,27 @@ class ShiftBuilderGrid:
     df_pt: pd.DataFrame = field(default_factory=pd.DataFrame, init=False, repr=False)
     df_meta: pd.DataFrame = field(default_factory=pd.DataFrame, init=False, repr=False)
     df_leave: pd.DataFrame = field(default_factory=pd.DataFrame, init=False, repr=False)
-    df_pre_raw: pd.DataFrame = field(default_factory=pd.DataFrame, init=False, repr=False)
-    df_special_marks: pd.DataFrame = field(default_factory=pd.DataFrame, init=False, repr=False)
+    df_pre_raw: pd.DataFrame = field(
+        default_factory=pd.DataFrame, init=False, repr=False
+    )
+    df_special_marks: pd.DataFrame = field(
+        default_factory=pd.DataFrame, init=False, repr=False
+    )
 
     # 予測DF（任意）
-    df_forecast: pd.DataFrame = field(default_factory=pd.DataFrame, init=False, repr=False)
+    df_forecast: pd.DataFrame = field(
+        default_factory=pd.DataFrame, init=False, repr=False
+    )
 
     # ------------ 集合/辞書 ------------
-    employees: list = field(default_factory=list, init=False)        # 社員番号list
-    days: list = field(default_factory=list, init=False)             # date list
-    week: list = field(default_factory=list, init=False)             # List[List[date]]
+    employees: list = field(default_factory=list, init=False)  # 社員番号list
+    days: list = field(default_factory=list, init=False)  # date list
+    week: list = field(default_factory=list, init=False)  # List[List[date]]
 
-    jobs: list = field(default_factory=list, init=False)             # 全業務（指定含む）
-    selectable_jobs: list = field(default_factory=list, init=False)  # ソルバーが選べる業務
+    jobs: list = field(default_factory=list, init=False)  # 全業務（指定含む）
+    selectable_jobs: list = field(
+        default_factory=list, init=False
+    )  # ソルバーが選べる業務
 
     rest_types: list = field(default_factory=list, init=False)
     rest_types_not_count: set = field(default_factory=set, init=False)
@@ -106,7 +115,9 @@ class ShiftBuilderGrid:
 
     # 分類
     sunday: list = field(default_factory=list, init=False)
-    holiday: list = field(default_factory=list, init=False)    # 日曜除外の祝日（元ロジックのまま）
+    holiday: list = field(
+        default_factory=list, init=False
+    )  # 日曜除外の祝日（元ロジックのまま）
     saturday: list = field(default_factory=list, init=False)
     weekday: list = field(default_factory=list, init=False)
 
@@ -139,18 +150,25 @@ class ShiftBuilderGrid:
     # =========================
     def load_csvs(self) -> None:
         cd = self.csv_dir
-        self.df_emp  = pd.read_csv(cd / "employees.csv", encoding="cp932")
-        self.df_zone = pd.read_csv(cd / "zones.csv", encoding="cp932")
-        self.df_need = pd.read_csv(cd / "employee_demand.csv", encoding="cp932")
-        self.df_ft   = pd.read_csv(cd / "jobtype_fulltime.csv", encoding="cp932")
-        self.df_pt   = pd.read_csv(cd / "jobtype_parttime.csv", encoding="cp932")
-        self.df_meta = pd.read_csv(cd / "shift_meta.csv", encoding="cp932")
-        self.df_leave = pd.read_csv(cd / "leave_types.csv", encoding="cp932")
-        self.df_pre_raw = pd.read_csv(cd / "pre_assignments.csv", encoding="cp932")
+
+        def _read_csv(p: Path) -> pd.DataFrame:
+            try:
+                return pd.read_csv(p, encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                return pd.read_csv(p, encoding="cp932")
+
+        self.df_emp = _read_csv(cd / "employees.csv")
+        self.df_zone = _read_csv(cd / "zones.csv")
+        self.df_need = _read_csv(cd / "employee_demand.csv")
+        self.df_ft = _read_csv(cd / "jobtype_fulltime.csv")
+        self.df_pt = _read_csv(cd / "jobtype_parttime.csv")
+        self.df_meta = _read_csv(cd / "shift_meta.csv")
+        self.df_leave = _read_csv(cd / "leave_types.csv")
+        self.df_pre_raw = _read_csv(cd / "pre_assignments.csv")
 
         sp_path = cd / "special_marks.csv"
         if sp_path.exists():
-            self.df_special_marks = pd.read_csv(sp_path, encoding="cp932")
+            self.df_special_marks = _read_csv(sp_path)
         else:
             self.df_special_marks = pd.DataFrame({"emp_no": [], "date": [], "kind": []})
 
@@ -182,11 +200,15 @@ class ShiftBuilderGrid:
             return
 
         try:
-            df = pd.read_csv(fp, encoding="cp932")
-        except Exception:
             df = pd.read_csv(fp, encoding="utf-8-sig")
+        except Exception:
+            df = pd.read_csv(fp, encoding="cp932")
 
-        date_cols = [c for c in df.columns if str(c).strip() in ["日付", "date", "Date", "年月日", "yyyymmdd"]]
+        date_cols = [
+            c
+            for c in df.columns
+            if str(c).strip() in ["日付", "date", "Date", "年月日", "yyyymmdd"]
+        ]
         if not date_cols:
             self.df_forecast = pd.DataFrame()
             return
@@ -211,26 +233,33 @@ class ShiftBuilderGrid:
     #  2) meta（shift_meta.csv の日付が正）
     # =========================
     def _build_meta(self) -> None:
-        self.start_date = self.df_meta["start_date"].iloc[0]
-        self.end_date   = self.df_meta["end_date"].iloc[0]
+        # shift_meta.csv は start_date 1行だけ想定（28日分はここで生成）
+        start_raw = self.df_meta["start_date"].iloc[0]
+        start_ts = pd.to_datetime(start_raw).normalize()
+        end_ts = start_ts + pd.Timedelta(days=27)
 
-        self.days = (
-            pd.to_datetime(self.df_meta["日付"])
-            .dt.normalize()
-            .dt.date
-            .tolist()
-        )
+        self.start_date = start_ts
+        self.end_date = end_ts
+
+        # ★28日分を生成（date型のリストにする）
+        self.days = pd.date_range(start=start_ts, periods=28).date.tolist()
 
         # 週ごとに分割（7日単位）
-        self.week = [self.days[i:i+7] for i in range(0, len(self.days), 7)]
+        self.week = [self.days[i : i + 7] for i in range(0, len(self.days), 7)]
 
         weekday = {d: d.weekday() for d in self.days}
         is_holiday = {d: jpholiday.is_holiday(d) for d in self.days}
 
-        self.sunday   = [d for d in self.days if weekday[d] == 6]
-        self.holiday  = [d for d in self.days if is_holiday[d] and weekday[d] != 6]  # 日曜除外（元ロジックのまま）
+        self.sunday = [d for d in self.days if weekday[d] == 6]
+        self.holiday = [
+            d for d in self.days if is_holiday[d] and weekday[d] != 6
+        ]  # 日曜除外（元ロジックのまま）
         self.saturday = [d for d in self.days if weekday[d] == 5 and not is_holiday[d]]
-        self.weekday  = [d for d in self.days if d not in self.sunday and d not in self.holiday and d not in self.saturday]
+        self.weekday = [
+            d
+            for d in self.days
+            if d not in self.sunday and d not in self.holiday and d not in self.saturday
+        ]
 
     # =========================
     #  3) 社員/業務/休暇などの基本集合・辞書
@@ -241,29 +270,34 @@ class ShiftBuilderGrid:
         df_need = self.df_need
         df_leave = self.df_leave
 
-        self.emp_working_hours = (
-            df_emp.set_index("社員番号")[["勤務時間(日)", "勤務時間(月)"]]
-            .to_dict(orient="index")
-        )
-        self.emp_dict = (
-            df_emp.set_index("社員番号")[["氏名", "社員タイプ"]]
-            .to_dict(orient="index")
+        self.emp_working_hours = df_emp.set_index("社員番号")[
+            ["勤務時間(日)", "勤務時間(月)"]
+        ].to_dict(orient="index")
+        self.emp_dict = df_emp.set_index("社員番号")[["氏名", "社員タイプ"]].to_dict(
+            orient="index"
         )
 
         self.employees = list(df_emp["社員番号"])
 
         # 全業務 jobs（指定業務含む）
-        self.jobs = df_zone.loc[df_zone["稼働"].isin(["通配", "混合", "組立", "指定業務"]), "区名"].tolist()
+        self.jobs = df_zone.loc[
+            df_zone["稼働"].isin(["通配", "混合", "組立", "指定業務"]), "区名"
+        ].tolist()
 
         # ソルバーが選べる業務（指定業務除外）
-        self.selectable_jobs = df_zone.loc[df_zone["稼働"].isin(["通配", "混合", "組立"]), "区名"].tolist()
+        self.selectable_jobs = df_zone.loc[
+            df_zone["稼働"].isin(["通配", "混合", "組立"]), "区名"
+        ].tolist()
 
         # 区名 -> シフトタイプ
         self.zone_to_shift = df_zone.set_index("区名")["シフトタイプ"].to_dict()
 
         # 社員番号 -> {早番/日勤/中勤/夜勤}
-        shift_cols = ["早番", "日勤", "中勤", "夜勤"]
-        self.emp_to_code = df_need.set_index("社員番号")[shift_cols].to_dict(orient="index")
+        time_cols = ["早番", "日勤", "中勤", "夜勤", "夜勤(土)", "夜勤(日)", "夜勤(祝)"]
+        time_cols = [c for c in time_cols if c in df_need.columns]  # 存在する列だけ使う
+        self.emp_to_code = df_need.set_index("社員番号")[time_cols].to_dict(
+            orient="index"
+        )
 
         # 休暇集合
         if "leave_name" in df_leave.columns:
@@ -272,7 +306,9 @@ class ShiftBuilderGrid:
             self.rest_types = list(df_leave["休暇名"])
 
         self.rest_types_not_count = {"非番", "週休"}
-        self.rest_types_count = [r for r in self.rest_types if r not in self.rest_types_not_count]
+        self.rest_types_count = [
+            r for r in self.rest_types if r not in self.rest_types_not_count
+        ]
 
         self.special_attendance = ["廃休", "マル超"]
 
@@ -306,7 +342,9 @@ class ShiftBuilderGrid:
         subset_df = df_need[selected_columns]
         self.emp_day_availability = (
             subset_df.set_index("社員番号")
-            .apply(lambda row: {k: int(v) for k, v in row.items() if int(v) == 1}, axis=1)
+            .apply(
+                lambda row: {k: int(v) for k, v in row.items() if int(v) == 1}, axis=1
+            )
             .to_dict()
         )
 
@@ -355,7 +393,9 @@ class ShiftBuilderGrid:
             for k in self.mapping.get(label, []):
                 self.req[(d, k)] = 1
 
-        self.req_holiday = {(d, k): v for (d, k), v in self.req.items() if d in set(self.holiday)}
+        self.req_holiday = {
+            (d, k): v for (d, k), v in self.req.items() if d in set(self.holiday)
+        }
 
     # =========================
     #  6) pre_assignments を辞書化
@@ -366,7 +406,9 @@ class ShiftBuilderGrid:
         required_pre_cols = ["emp_no", "date", "row_kind", "value"]
         missing_cols = [c for c in required_pre_cols if c not in df_pre_raw.columns]
         if missing_cols:
-            raise KeyError(f"pre_assignments.csv missing columns: {missing_cols} / have: {df_pre_raw.columns.tolist()}")
+            raise KeyError(
+                f"pre_assignments.csv missing columns: {missing_cols} / have: {df_pre_raw.columns.tolist()}"
+            )
 
         df_pre = df_pre_raw[required_pre_cols].copy()
         df_pre["date"] = pd.to_datetime(df_pre["date"]).dt.date
@@ -385,7 +427,9 @@ class ShiftBuilderGrid:
         elif "休暇名" in df_leave.columns:
             leave_codes = set(df_leave["休暇名"].astype(str).str.strip().tolist())
         else:
-            raise KeyError(f"leave_types.csv columns not supported: {df_leave.columns.tolist()}")
+            raise KeyError(
+                f"leave_types.csv columns not supported: {df_leave.columns.tolist()}"
+            )
 
         if "区名" in self.df_zone.columns:
             zone_codes = set(self.df_zone["区名"].astype(str).str.strip().tolist())
@@ -432,13 +476,19 @@ class ShiftBuilderGrid:
         df_special_marks = self.df_special_marks
         if df_special_marks is not None and len(df_special_marks) > 0:
             required_sp_cols = ["emp_no", "date", "kind"]
-            sp_missing = [c for c in required_sp_cols if c not in df_special_marks.columns]
+            sp_missing = [
+                c for c in required_sp_cols if c not in df_special_marks.columns
+            ]
             if sp_missing:
-                raise KeyError(f"special_marks.csv missing columns: {sp_missing} / have: {df_special_marks.columns.tolist()}")
+                raise KeyError(
+                    f"special_marks.csv missing columns: {sp_missing} / have: {df_special_marks.columns.tolist()}"
+                )
 
             df_special = df_special_marks[required_sp_cols].copy()
             df_special["date"] = pd.to_datetime(df_special["date"]).dt.date
-            df_special["emp_no"] = pd.to_numeric(df_special["emp_no"], errors="raise").astype(int)
+            df_special["emp_no"] = pd.to_numeric(
+                df_special["emp_no"], errors="raise"
+            ).astype(int)
 
             D_set = set(self.days)
             df_special = df_special[df_special["date"].isin(D_set)].copy()
@@ -488,8 +538,18 @@ class ShiftBuilderGrid:
         priority調整に使う過不足（excess）を返す。
         """
         extra_rest_codes = {
-            "計年", "年休", "夏休", "冬休", "代休",
-            "承欠", "休職", "産休", "育休", "介護", "病休", "その他",
+            "計年",
+            "年休",
+            "夏休",
+            "冬休",
+            "代休",
+            "承欠",
+            "休職",
+            "産休",
+            "育休",
+            "介護",
+            "病休",
+            "その他",
         }
 
         employee_possible_days: dict[int, int] = {}
@@ -511,7 +571,9 @@ class ShiftBuilderGrid:
 
         num_holiday = len(self.holiday)
         total_supply = sum(employee_possible_days.values())
-        total_supply_adj = total_supply - (len(self.employees) - 2) * num_holiday  # 旧ロジックそのまま
+        total_supply_adj = (
+            total_supply - (len(self.employees) - 2) * num_holiday
+        )  # 旧ロジックそのまま
 
         base_demand = 200 - 20  # 旧ロジック踏襲
         total_demand = base_demand - (7 * num_holiday)
@@ -548,7 +610,9 @@ class ShiftBuilderGrid:
             for d in low_days.index:
                 key = (d, "速夜")
                 if key in self.priority_map:
-                    self.priority_map[key] = max(0.0, float(self.priority_map[key]) - 2.0)
+                    self.priority_map[key] = max(
+                        0.0, float(self.priority_map[key]) - 2.0
+                    )
 
     # =========================
     #  8) priority_map / 欠区優先順位
@@ -556,7 +620,7 @@ class ShiftBuilderGrid:
     def _build_priority_maps(self) -> None:
         subset = self.df_zone.loc[
             self.df_zone["区名"].isin(self.selectable_jobs),
-            ["区名", "月", "火", "水", "木", "金", "土", "日", "祝"]
+            ["区名", "月", "火", "水", "木", "金", "土", "日", "祝"],
         ].set_index("区名")
         self.job_availability = subset.to_dict(orient="index")
 
@@ -565,8 +629,8 @@ class ShiftBuilderGrid:
         dow_cols = ["月", "火", "水", "木", "金", "土", "日", "祝"]
         priority_series = (
             ja.loc[~ja.index.isin(exclude), dow_cols]
-              .sum(axis=1)
-              .sort_values(ascending=True)
+            .sum(axis=1)
+            .sort_values(ascending=True)
         )
         self.missing_zone_priority = priority_series.index.tolist()
 
@@ -583,13 +647,15 @@ class ShiftBuilderGrid:
     # =========================
     def _build_avail(self) -> None:
         self.avail = {
-            (i, d): 1 if (i, d) in self.pre_dict_work else self.emp_day_availability.get(i, {}).get(self.date_label[d], 0)
+            (i, d): 1
+            if (i, d) in self.pre_dict_work
+            else self.emp_day_availability.get(i, {}).get(self.date_label[d], 0)
             for i in self.emp_day_availability
             for d in self.days
         }
 
     # =========================
-    #  10) 変数定義（元ロジックそのまま）
+    #  10) 変数定義
     # =========================
     def _define_variables(self) -> None:
         self.model = pulp.LpProblem("Shift_Scheduling", pulp.LpMinimize)
@@ -597,51 +663,57 @@ class ShiftBuilderGrid:
         self.x = pulp.LpVariable.dicts(
             "Shift",
             [(i, d, k) for i in self.employees for d in self.days for k in self.jobs],
-            cat="Binary"
+            cat="Binary",
         )
 
         self.y = pulp.LpVariable.dicts(
-            "WorkDay",
-            [(i, d) for i in self.employees for d in self.days],
-            cat="Binary"
+            "WorkDay", [(i, d) for i in self.employees for d in self.days], cat="Binary"
         )
 
         self.rest = pulp.LpVariable.dicts(
             "Rest",
-            [(i, d, r) for i in self.employees for d in self.days for r in self.rest_types],
-            cat="Binary"
+            [
+                (i, d, r)
+                for i in self.employees
+                for d in self.days
+                for r in self.rest_types
+            ],
+            cat="Binary",
         )
 
         self.specialWork = pulp.LpVariable.dicts(
             "X_Special",
-            [(i, d, s) for i in self.employees for d in self.days for s in self.special_attendance],
-            cat=pulp.LpBinary
+            [
+                (i, d, s)
+                for i in self.employees
+                for d in self.days
+                for s in self.special_attendance
+            ],
+            cat=pulp.LpBinary,
         )
 
         self.missing = pulp.LpVariable.dicts(
-            "Missing",
-            [(d, k) for (d, k) in self.req.keys()],
-            cat="Binary"
+            "Missing", [(d, k) for (d, k) in self.req.keys()], cat="Binary"
         )
 
         self.normal_work = pulp.LpVariable.dicts(
             "NormalWork",
             [(i, d) for i in self.employees for d in self.days],
-            cat=pulp.LpBinary
+            cat=pulp.LpBinary,
         )
 
         self.devPos = {}
         self.devNeg = {}
 
     # =========================
-    #  11) 制約（元ロジックそのまま）
+    #  11) 制約
     # =========================
     def add_constraints(self) -> None:
         model = self.model
         assert model is not None
 
-        # ★ここは「数式の形」を守るために残す（ロジック不変）
-        I = self.employees
+        # ★ここは「数式の形」を守るために残す
+        I = self.employees # noqa: E741
         D = self.days
         K = self.jobs
         R = self.rest_types
@@ -707,7 +779,10 @@ class ShiftBuilderGrid:
                         if s == s_type:
                             model += specialWork[(i, d, s)] == 1, f"FixSpec_{i}_{d}_{s}"
                         else:
-                            model += specialWork[(i, d, s)] == 0, f"ZeroSpec_{i}_{d}_{s}"
+                            model += (
+                                specialWork[(i, d, s)] == 0,
+                                f"ZeroSpec_{i}_{d}_{s}",
+                            )
                 else:
                     for s in special_attendance:
                         model += specialWork[(i, d, s)] == 0, f"NoSpec_{i}_{d}_{s}"
@@ -740,12 +815,18 @@ class ShiftBuilderGrid:
         # ---- WorkOrRest ----
         for i in I:
             for d in D:
-                model += (y[(i, d)] + pulp.lpSum(rest[(i, d, r)] for r in R)) == 1, f"WorkOrRest_{i}_{d}"
+                model += (
+                    (y[(i, d)] + pulp.lpSum(rest[(i, d, r)] for r in R)) == 1,
+                    f"WorkOrRest_{i}_{d}",
+                )
 
         # ---- 1日1シフト ----
         for i in I:
             for d in D:
-                model += pulp.lpSum(x[(i, d, k)] for k in K) == y[(i, d)], f"OneShiftOrNone_{i}_{d}"
+                model += (
+                    pulp.lpSum(x[(i, d, k)] for k in K) == y[(i, d)],
+                    f"OneShiftOrNone_{i}_{d}",
+                )
 
         # ---- 週休/非番 と 特別の排他 ----
         for i in I:
@@ -755,13 +836,31 @@ class ShiftBuilderGrid:
 
         # ---- 月の回数 ----
         for i in I:
-            model += pulp.lpSum(rest[(i, d, "週休")] + specialWork[(i, d, "廃休")] for d in D) == 4, f"WeeklyOff_{i}"
-            model += pulp.lpSum(rest[(i, d, "非番")] + specialWork[(i, d, "マル超")] for d in D) >= 4, f"Hiban_{i}"
+            model += (
+                pulp.lpSum(
+                    rest[(i, d, "週休")] + specialWork[(i, d, "廃休")] for d in D
+                )
+                == 4,
+                f"WeeklyOff_{i}",
+            )
+            model += (
+                pulp.lpSum(
+                    rest[(i, d, "非番")] + specialWork[(i, d, "マル超")] for d in D
+                )
+                >= 4,
+                f"Hiban_{i}",
+            )
 
         # ---- 週に1回週休（廃休カウント） ----
         for i in I:
             for w, days_in_week in enumerate(W):
-                model += pulp.lpSum(rest[(i, d, "週休")] + specialWork[(i, d, "廃休")] for d in days_in_week) == 1
+                model += (
+                    pulp.lpSum(
+                        rest[(i, d, "週休")] + specialWork[(i, d, "廃休")]
+                        for d in days_in_week
+                    )
+                    == 1
+                )
 
         # ---- 週1非番ズレ（スラック） ----
         for i in I:
@@ -778,14 +877,20 @@ class ShiftBuilderGrid:
         # ---- 日曜：休むなら週休 ----
         for i in I:
             for d in D_sunday:
-                model += y[(i, d)] + rest[(i, d, "週休")] == 1, f"SundayWorkOrWeeklyOff_{i}_{d}"
+                model += (
+                    y[(i, d)] + rest[(i, d, "週休")] == 1,
+                    f"SundayWorkOrWeeklyOff_{i}_{d}",
+                )
 
         # ---- 土曜：休むなら非番（事前指定休暇があればスキップ）----
         for i in I:
             for d in D_saturday:
                 if (i, d) in pre_dict_rest:
                     continue
-                model += y[(i, d)] + rest[(i, d, "非番")] == 1, f"SaturdayWorkOrNonban_{i}_{d}"
+                model += (
+                    y[(i, d)] + rest[(i, d, "非番")] == 1,
+                    f"SaturdayWorkOrNonban_{i}_{d}",
+                )
 
         # ---- 月勤務時間（等式） ----
         for i in I:
@@ -819,27 +924,44 @@ class ShiftBuilderGrid:
 
                 if is_sun_holiday(d):
                     if allow_shukkyu_on_sun_holiday(i, d):
-                        model += y[(i, d)] + rest[(i, d, "祝休")] == 1, f"SunHolNY_Reg_{i}_{d}"
+                        model += (
+                            y[(i, d)] + rest[(i, d, "祝休")] == 1,
+                            f"SunHolNY_Reg_{i}_{d}",
+                        )
                     else:
-                        model += y[(i, d)] + rest[(i, d, "週休")] == 1, f"SunHol_WorkOrShukyu_{i}_{d}"
+                        model += (
+                            y[(i, d)] + rest[(i, d, "週休")] == 1,
+                            f"SunHol_WorkOrShukyu_{i}_{d}",
+                        )
                     continue
 
                 if emp_type == "正社員":
                     model += y[(i, d)] + rest[(i, d, "祝休")] == 1, f"Hol_Reg_{i}_{d}"
                 else:
-                    model += y[(i, d)] + rest[(i, d, "非番")] == 1, f"Hol_NonReg_{i}_{d}"
+                    model += (
+                        y[(i, d)] + rest[(i, d, "非番")] == 1,
+                        f"Hol_NonReg_{i}_{d}",
+                    )
                     model += rest[(i, d, "祝休")] == 0, f"NoShukkyu_NonReg_{i}_{d}"
 
         # ---- 10連勤禁止（<=9）----
         for i in I:
             for d_idx in range(len(D) - 10 + 1):
                 consecutive_days = [D[d_idx + offset] for offset in range(10)]
-                model += pulp.lpSum(y[(i, day_)] for day_ in consecutive_days) <= 9, f"No10ConsecutiveDays_{i}_{d_idx}"
+                model += (
+                    pulp.lpSum(y[(i, day_)] for day_ in consecutive_days) <= 9,
+                    f"No10ConsecutiveDays_{i}_{d_idx}",
+                )
 
         # ---- normal_work 紐付け ----
         for i in I:
             for d in D:
-                model += normal_work[(i, d)] >= y[(i, d)] - specialWork[(i, d, "廃休")] - specialWork[(i, d, "マル超")]
+                model += (
+                    normal_work[(i, d)]
+                    >= y[(i, d)]
+                    - specialWork[(i, d, "廃休")]
+                    - specialWork[(i, d, "マル超")]
+                )
                 model += normal_work[(i, d)] <= 1 - specialWork[(i, d, "廃休")]
                 model += normal_work[(i, d)] <= 1 - specialWork[(i, d, "マル超")]
 
@@ -847,21 +969,26 @@ class ShiftBuilderGrid:
         for i in I:
             for start_idx in range(len(D) - 6 + 1):
                 consecutive_dates = [D[start_idx + r] for r in range(6)]
-                model += pulp.lpSum(normal_work[(i, d_)] for d_ in consecutive_dates) <= 5
+                model += (
+                    pulp.lpSum(normal_work[(i, d_)] for d_ in consecutive_dates) <= 5
+                )
 
         # ---- 欠区カバレッジ（forced除外）----
         for (d, k), needed in req.items():
             forced_workers = [i for i in I if pre_dict_work.get((i, d)) == k]
-            forced_count   = len(forced_workers)
+            forced_count = len(forced_workers)
             free_workers = [i for i in I if i not in forced_workers]
 
             if forced_count > 0:
                 model += (missing[(d, k)] == 0), f"MissingFixed0_{d}_{k}"
 
             model += (
-                pulp.lpSum(x[(i, d, k)] for i in free_workers) + forced_count
-                == needed * (1 - missing[(d, k)])
-            ), f"Coverage_{d}_{k}"
+                (
+                    pulp.lpSum(x[(i, d, k)] for i in free_workers) + forced_count
+                    == needed * (1 - missing[(d, k)])
+                ),
+                f"Coverage_{d}_{k}",
+            )
 
     # =========================
     #  12) 目的関数（元ロジックそのまま）
@@ -869,8 +996,8 @@ class ShiftBuilderGrid:
     def set_objective(self, alpha: float = 0.1) -> None:
         model = self.model
         assert model is not None
-
-        I, D, W = self.employees, self.days, self.week
+        # ★ここは「数式の形」を守るために残す
+        I, D, W = self.employees, self.days, self.week # noqa: E741
         req = self.req
         priority_map = self.priority_map
         missing = self.missing
@@ -880,15 +1007,13 @@ class ShiftBuilderGrid:
 
         obj = (
             pulp.lpSum(
-                priority_map.get((d, k), 0) * missing[(d, k)]
-                for (d, k) in req.keys()
+                priority_map.get((d, k), 0) * missing[(d, k)] for (d, k) in req.keys()
             )
             + pulp.lpSum(
-                devPos[(i, w)] + devNeg[(i, w)]
-                for i in I
-                for w in range(len(W))
+                devPos[(i, w)] + devNeg[(i, w)] for i in I for w in range(len(W))
             )
-            - alpha * pulp.lpSum(
+            - alpha
+            * pulp.lpSum(
                 job_weight[i][k] * x[(i, d, k)]
                 for i in job_weight
                 for d in D
@@ -934,3 +1059,85 @@ class ShiftBuilderGrid:
             "req": len(self.req),
             "forecast_rows": 0 if self.df_forecast is None else len(self.df_forecast),
         }
+
+    def export_solution_df(self) -> pd.DataFrame:
+        """
+        最適化結果を DataFrame にして返す。
+        形式: emp_no, date, assigned_zone, time(upper), lower_kind(休暇/特別/業務) など
+        ※ Excelに戻すための最低限の形にする。
+        """
+        I = self.employees # noqa: E741
+        D = self.days
+        K = self.jobs
+        R = self.rest_types
+        S = self.special_attendance
+
+        x = self.x
+        rest = self.rest
+        specialWork = self.specialWork
+        pre_time = self.pre_dict_time  # 上段の事前指定（時間）
+        emp_dict = self.emp_dict
+
+        def infer_upper_from_assignment(emp_no: int, zone: str) -> str:
+            """割当区 -> シフトタイプ -> 社員の時間帯コード（早1/日1...）を返す"""
+            if not zone:
+                return ""
+            st = self.zone_to_shift.get(zone)  # "早番" など
+            if not st:
+                return ""
+            return self.emp_to_code.get(emp_no, {}).get(st, "")
+
+        rows: list[dict] = []
+        for i in I:
+            for d in D:
+                # 上段：事前指定があればそれ（最優先）
+                upper = pre_time.get((i, d), "")
+
+                # 下段：休暇 > 特別 > 業務
+                lower = ""
+
+                # 休暇
+                for r in R:
+                    if pulp.value(rest[(i, d, r)]) >= 0.5:
+                        lower = r
+                        break
+
+                # 特別（廃休/マル超）
+                if lower == "":
+                    for s in S:
+                        if pulp.value(specialWork[(i, d, s)]) >= 0.5:
+                            lower = s
+                            break
+
+                # 業務（区）
+                zone = ""
+                if lower == "":
+                    for k in K:
+                        if pulp.value(x[(i, d, k)]) >= 0.5:
+                            zone = k
+                            lower = k
+                            break
+
+                # ★上段補完：事前指定が無ければ、割当区から社員の時間帯コードを入れる
+                if str(upper).strip() == "":
+                    upper = infer_upper_from_assignment(i, zone)
+
+                rows.append(
+                    {
+                        "emp_no": i,
+                        "employee_name": emp_dict.get(i, {}).get("氏名", ""),
+                        "date": d,
+                        "upper": upper,
+                        "lower": lower,
+                        "zone": zone,
+                    }
+                )
+
+        return pd.DataFrame(rows)
+
+    def export_solution_csv(self, out_path: Path) -> None:
+        df = self.export_solution_df()
+        df["upper"] = df["upper"].fillna("")
+        df["zone"] = df["zone"].fillna("")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out_path, index=False, encoding="cp932")

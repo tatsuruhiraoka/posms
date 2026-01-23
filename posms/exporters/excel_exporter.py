@@ -1,12 +1,13 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional
 
 import pandas as pd
 from shutil import copy2
 from openpyxl import load_workbook, Workbook
 from openpyxl.utils.cell import coordinate_to_tuple
 from openpyxl.utils import get_column_letter
+
 
 def write_dataframe_to_excel(
     df: pd.DataFrame,
@@ -74,7 +75,11 @@ def write_dataframe_to_excel(
         ws = wb.create_sheet(title=sheet_name, index=idx)
     else:
         # append=True か、まだ存在しない場合
-        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
+        ws = (
+            wb[sheet_name]
+            if sheet_name in wb.sheetnames
+            else wb.create_sheet(title=sheet_name)
+        )
 
     # ==== 書き込み座標 ====
     row0, col0 = coordinate_to_tuple(start_cell)  # "AB5" → (5, 28)
@@ -83,16 +88,21 @@ def write_dataframe_to_excel(
         # 既存ヘッダと一致するか判定（一致しなければヘッダから書く）
         write_header = True
         if ws.max_row >= row0 and _df.shape[1] > 0:
-            existing = [ws.cell(row=row0, column=col0 + j).value for j in range(_df.shape[1])]
+            existing = [
+                ws.cell(row=row0, column=col0 + j).value for j in range(_df.shape[1])
+            ]
             if existing == list(_df.columns):
                 write_header = False
 
         # 実質最終行（対象列のどれかに値があれば使用中とみなす）
         last = ws.max_row
-        while last >= row0 and all(ws.cell(row=last, column=col0 + j).value in (None, "") for j in range(_df.shape[1])):
+        while last >= row0 and all(
+            ws.cell(row=last, column=col0 + j).value in (None, "")
+            for j in range(_df.shape[1])
+        ):
             last -= 1
         start_row = (row0 if write_header else row0 + 1) if last < row0 else last + 1
-        base = (0 if write_header else -1)
+        base = 0 if write_header else -1
 
         if verbose:
             print(f"[append] header_match={not write_header}, start_row={start_row}")
@@ -105,7 +115,9 @@ def write_dataframe_to_excel(
         # 値
         for i, row in enumerate(_df.itertuples(index=False)):
             for j, v in enumerate(row):
-                ws.cell(row=start_row + base + 1 + i, column=col0 + j, value=_to_cell(v))
+                ws.cell(
+                    row=start_row + base + 1 + i, column=col0 + j, value=_to_cell(v)
+                )
     else:
         # 完全上書き（シート作り直し済み）
         # ヘッダ

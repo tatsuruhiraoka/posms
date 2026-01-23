@@ -41,6 +41,14 @@ dependencies = [
   "pydantic-core==2.16.3",
 ]
 
+[project.optional-dependencies]
+optimizer = [
+  "pandas==2.2.*",
+  "numpy==1.26.*",
+  "pulp==2.8.*",
+  "jpholiday==0.1.*",
+]
+
 [project.scripts]
 posms = "posms.cli:app"
 

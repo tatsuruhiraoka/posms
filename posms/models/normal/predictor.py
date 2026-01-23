@@ -207,11 +207,14 @@ class ModelPredictor:
         """千通単位の四捨五入（負値は 0 に丸め）"""
         if x <= 0:
             return 0
-        return int(
-            (Decimal(str(x)) / Decimal("1000")).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
+        return (
+            int(
+                (Decimal(str(x)) / Decimal("1000")).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
             )
-        ) * 1000
+            * 1000
+        )
 
     @staticmethod
     def _is_holiday(dt) -> bool:
@@ -240,7 +243,11 @@ class ModelPredictor:
         - 千通単位の四捨五入
         """
         if isinstance(raw, pd.DataFrame):
-            s = raw[value_col] if value_col and value_col in raw.columns else raw.iloc[:, 0]
+            s = (
+                raw[value_col]
+                if value_col and value_col in raw.columns
+                else raw.iloc[:, 0]
+            )
         else:
             s = raw
         s = s.asfreq("D")
@@ -255,7 +262,15 @@ class ModelPredictor:
                     deliver = cls._round_to_thousand_half_up(delivered)
                 else:
                     deliver = max(0.0, delivered)
-                rows.append((dt.date(), v, carry if carry > 0 else None, int(max(0, deliver)), True))
+                rows.append(
+                    (
+                        dt.date(),
+                        v,
+                        carry if carry > 0 else None,
+                        int(max(0, deliver)),
+                        True,
+                    )
+                )
                 carry = 0.0
             else:
                 carry += v
@@ -265,14 +280,19 @@ class ModelPredictor:
             dt = s.index[-1] + pd.Timedelta(days=1)
             while not cls._is_delivery_day(dt):
                 dt += pd.Timedelta(days=1)
-            deliver = cls._round_to_thousand_half_up(carry) if round_to_thousand else max(0.0, carry)
+            deliver = (
+                cls._round_to_thousand_half_up(carry)
+                if round_to_thousand
+                else max(0.0, carry)
+            )
             rows.append((dt.date(), 0.0, carry, int(max(0, deliver)), True))
 
         return pd.DataFrame(
             rows,
             columns=["date", "raw_pred", "carry_in", "deliver_pred", "is_delivery_day"],
         )
-        
+
+
 # ------------ 手動テスト（任意） ------------
 if __name__ == "__main__":
     logging.basicConfig(
