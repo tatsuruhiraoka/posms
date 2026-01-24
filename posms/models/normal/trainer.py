@@ -37,7 +37,7 @@ import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
 
-from .._mlflow import set_tracking_uri_zero_config
+from ..._mlflow import set_tracking_uri_zero_config
 from ._metrics import rmse as rmse_metric  # 既存の rmse 実装を利用
 
 LOGGER = logging.getLogger(__name__)  # basicConfig は呼び出し側に委ねる
