@@ -30,6 +30,7 @@ def _cbc_path_from_meipass() -> str | None:
 
     return None
 
+
 def _write_solution_csv(out_path: Path, rows: list[dict]) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
@@ -116,7 +117,7 @@ def main() -> int:
     sb = ShiftBuilderGrid(csv_dir=csvdir)
     sb.build()
     sb.solve(alpha=alpha, msg=msg, cbc_path=cbc_path)
-    
+
     # summary.json（デバッグ用）
     summary = sb.summary()
     outdir.mkdir(parents=True, exist_ok=True)
