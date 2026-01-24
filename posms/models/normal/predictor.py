@@ -26,7 +26,7 @@ import pandas as pd
 import xgboost as xgb
 import jpholiday
 
-from .._mlflow import set_tracking_uri_zero_config
+from ..._mlflow import set_tracking_uri_zero_config
 
 LOGGER = logging.getLogger(__name__)
 
