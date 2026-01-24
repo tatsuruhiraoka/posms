@@ -11,6 +11,7 @@ from mlflow.tracking import MlflowClient
 from posms.models.normal.trainer import ModelTrainer
 from posms.models.normal.predictor import ModelPredictor
 
+
 def _dummy_dataset(n: int = 50):
     rng = np.random.default_rng(42)
     X = pd.DataFrame(
