@@ -1,6 +1,6 @@
 # tests/test_metrics_rmse.py
 import numpy as np
-from posms.models import _metrics as M
+from posms.models.normal import _metrics as M
 
 
 def test_rmse_basic_and_kwargs():

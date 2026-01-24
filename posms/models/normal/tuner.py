@@ -20,7 +20,9 @@ from sklearn.model_selection import TimeSeriesSplit
 try:
     import optuna
 except Exception as e:
-    raise RuntimeError("optuna がインストールされていません。`pip install optuna` を実行してください。") from e
+    raise RuntimeError(
+        "optuna がインストールされていません。`pip install optuna` を実行してください。"
+    ) from e
 
 
 def tune_xgb_optuna(
@@ -28,7 +30,7 @@ def tune_xgb_optuna(
     y: pd.Series,
     *,
     n_trials: int = 50,
-    timeout: Optional[int] = None,   # 秒
+    timeout: Optional[int] = None,  # 秒
     seed: int = 42,
     n_splits: int = 3,
     max_rounds: int = 5000,
@@ -88,7 +90,11 @@ def tune_xgb_optuna(
                 pred = bst.predict(dva, iteration_range=(0, bst.best_iteration + 1))
             except TypeError:
                 ntree_limit = getattr(bst, "best_ntree_limit", None)
-                pred = bst.predict(dva, ntree_limit=ntree_limit) if ntree_limit else bst.predict(dva)
+                pred = (
+                    bst.predict(dva, ntree_limit=ntree_limit)
+                    if ntree_limit
+                    else bst.predict(dva)
+                )
 
             rmse = float(np.sqrt(np.mean((y_arr[va_idx] - pred) ** 2)))
             rmses.append(rmse)

@@ -1,7 +1,6 @@
 # posms/model/registered_plus/predictor.py
 from __future__ import annotations
 
-from typing import Sequence
 
 import pandas as pd
 

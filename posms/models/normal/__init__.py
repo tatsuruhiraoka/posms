@@ -26,6 +26,7 @@
 MLFLOW_TRACKING_URI を未設定の場合、リポジトリ直下 ``mlruns/`` を自動利用します。
 Model Registry が利用できない環境では、Predictor は最新の run を自動選択して推論します。
 """
+
 from __future__ import annotations
 
 import importlib
@@ -69,6 +70,7 @@ def __dir__() -> list[str]:  # pragma: no cover
 if TYPE_CHECKING:  # pragma: no cover
     from .trainer import ModelTrainer  # noqa: F401
     from .predictor import ModelPredictor  # noqa: F401
+
     try:
         from .tuner import tune_xgb_optuna
     except Exception:

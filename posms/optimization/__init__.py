@@ -1,5 +1,4 @@
 # posms/optimization/__init__.py
-from __future__ import annotations
 
 """
 posms.optimization
@@ -13,6 +12,8 @@ __init__ では重い依存（pulp/openpyxl）を即 import しないために l
 - ShiftBuilderGrid
 - run  （runner入口: params(dict) -> dict を想定）
 """
+
+from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 import importlib

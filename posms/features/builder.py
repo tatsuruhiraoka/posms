@@ -6,6 +6,9 @@ posms.features.builder
 FeatureBuilder（MailVolume + jpholiday 対応）
 
 - 単一 office_id の系列を DB から取得（DATABASE_URL か POSTGRES_* で接続）
+- 種別（mail_kind）:
+    - mailvolume_by_type がある場合は mail_kind で絞り込む
+    - 旧 MailVolume テーブルの場合は mail_kind を無視（後方互換）
 - 特徴量:
     dow, dow_sin, dow_cos,
     is_holiday, is_after_holiday, is_after_after_holiday,
@@ -29,8 +32,6 @@ import pandas as pd
 import jpholiday
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.engine import URL, Engine
-
-from posms.models import ModelPredictor
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ class FeatureBuilder:
         対象局 ID。None の場合、データ内に 1 局しか無ければ自動選択。
         複数局が存在するのに未指定なら例外。
     mail_kind : str
-        対象の郵便種別。mailvolume_by_type.mail_kind の値（normal, yu_packet, ...）。
+        対象の郵便種別。mailvolume_by_type.mail_kind の値（normal, registered_plus, ...）。
         旧 MailVolume テーブルを使う場合は無視される。
     base_dir : Path | None
         （将来拡張用）プロジェクトルート推定に使用。
@@ -84,6 +85,33 @@ class FeatureBuilder:
             self.engine.url,
             self.office_id,
             self.mail_kind,
+        )
+
+    # ------------------------- Predictor 解決 -------------------------
+    def _resolve_predictor_class(self):
+        """
+        mail_kind に応じて ModelPredictor クラスを返す。
+
+        NOTE:
+        - posms.models のトップレベル re-export に依存しない（入口が壊れやすい）
+        - 必要になるまで import しない（CLI/export系の import 連鎖を防ぐ）
+        """
+        mk = (self.mail_kind or "normal").lower()
+
+        if mk == "normal":
+            from posms.models.normal.predictor import ModelPredictor
+
+            return ModelPredictor
+
+        if mk == "registered_plus":
+            from posms.models.registered_plus.predictor import ModelPredictor
+
+            return ModelPredictor
+
+        # 将来拡張（yu_packet 等）を追加する場合はここに追記
+        raise ValueError(
+            f"Unsupported mail_kind for predictor: {self.mail_kind!r}. "
+            f"supported=['normal', 'registered_plus']"
         )
 
     # ------------------------- DB 接続 -------------------------
@@ -255,7 +283,9 @@ class FeatureBuilder:
         戻り値: 0/1 int Series（name='is_holiday' として返す）
         """
         dates = pd.to_datetime(dates)
-        is_pub_holiday = dates.dt.date.map(lambda d: bool(jpholiday.is_holiday(d))).astype(int)
+        is_pub_holiday = dates.dt.date.map(
+            lambda d: bool(jpholiday.is_holiday(d))
+        ).astype(int)
         is_weekend = (dates.dt.weekday >= 5).astype(int)
         non_working = ((is_pub_holiday == 1) | (is_weekend == 1)).astype(int)
         return non_working.rename("is_holiday")
@@ -400,12 +430,15 @@ class FeatureBuilder:
             )
 
         X_row = row[FEATURE_COLUMNS].astype(float)
-        pred = ModelPredictor(
+
+        Predictor = self._resolve_predictor_class()
+        pred = Predictor(
             run_id=run_id,
             stage=stage,
             model_name=model_name,
             tracking_uri=tracking_uri,
         ).predict(X_row)[0]
+
         LOGGER.info(
             "Predict %s → %.2f (office_id=%s, mail_kind=%s)",
             tgt,

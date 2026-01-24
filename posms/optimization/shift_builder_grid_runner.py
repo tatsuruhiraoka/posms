@@ -49,7 +49,7 @@ def build_assignments(
         for d in sb.days:
             # 仕事かどうか（WorkOrRest で 0/1）
             yv = sb.y[(i, d)].varValue
-            is_workday = (yv is not None and yv > 0.5)
+            is_workday = yv is not None and yv > 0.5
 
             # --- rest（休暇）---
             rest_type: Optional[str] = None
@@ -120,8 +120,10 @@ def run(params: Dict[str, Any]) -> Dict[str, Any]:
         in_xlsm = Path(params["in_xlsm"])
 
         out_xlsm_param = params.get("out_xlsm")
-        out_xlsm = Path(out_xlsm_param) if out_xlsm_param else in_xlsm.with_name(
-            f"{in_xlsm.stem}_out{in_xlsm.suffix}"
+        out_xlsm = (
+            Path(out_xlsm_param)
+            if out_xlsm_param
+            else in_xlsm.with_name(f"{in_xlsm.stem}_out{in_xlsm.suffix}")
         )
 
         alpha = float(params.get("alpha", 0.1))
