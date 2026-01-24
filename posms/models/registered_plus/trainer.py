@@ -1,7 +1,7 @@
 # posms/model/registered_plus/trainer.py
 from __future__ import annotations
 
-from typing import Sequence, Tuple
+from typing import Tuple
 
 import mlflow
 import pandas as pd

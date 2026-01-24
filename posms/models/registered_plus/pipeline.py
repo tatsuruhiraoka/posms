@@ -21,6 +21,7 @@ from posms.models.registered_plus.predictor import predict as _predict
 # Train (from historical)
 # =========================
 
+
 @dataclass(frozen=True)
 class TrainResult:
     model: object
@@ -48,12 +49,16 @@ def _split_time_series(
         if valid_days <= 0:
             raise ValueError("valid_days must be positive")
         if len(df_feat) <= valid_days:
-            raise ValueError(f"not enough rows for split: n={len(df_feat)}, valid_days={valid_days}")
+            raise ValueError(
+                f"not enough rows for split: n={len(df_feat)}, valid_days={valid_days}"
+            )
         df_train = df_feat.iloc[:-valid_days].copy()
         df_valid = df_feat.iloc[-valid_days:].copy()
 
     if len(df_train) == 0 or len(df_valid) == 0:
-        raise ValueError(f"split resulted in empty train/valid: train={len(df_train)}, valid={len(df_valid)}")
+        raise ValueError(
+            f"split resulted in empty train/valid: train={len(df_train)}, valid={len(df_valid)}"
+        )
 
     return df_train, df_valid
 
@@ -118,11 +123,12 @@ def train_from_hist(
 # Forecast (chained from sum)
 # =========================
 
+
 @dataclass(frozen=True)
 class ForecastResult:
-    y_pred: pd.Series              # registered_plus 予測（index=日付）
-    df_future_feat: pd.DataFrame   # 予測に使った未来特徴量（確認用）
-    df_all: pd.DataFrame           # 連鎖に使った過去+未来（確認用）
+    y_pred: pd.Series  # registered_plus 予測（index=日付）
+    df_future_feat: pd.DataFrame  # 予測に使った未来特徴量（確認用）
+    df_all: pd.DataFrame  # 連鎖に使った過去+未来（確認用）
 
 
 def forecast_from_sum(

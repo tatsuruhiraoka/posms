@@ -443,7 +443,14 @@ create temp table stage_eavail (
   available_fri int,
   available_sat int,
   available_sun int,
-  available_hol int
+  available_hol int,
+  available_early     text,
+  available_day       text,
+  available_mid       text,
+  available_night     text,
+  available_night_sat text,
+  available_night_sun text,
+  available_night_hol text
 );
 copy stage_eavail from :'eavail_file' with (format csv, header true, encoding 'UTF8');
 
@@ -460,7 +467,7 @@ select e.employee_id,
        coalesce(s.available_sun,0),
        coalesce(s.available_hol,0)
 from stage_eavail s
-join employee e on e.employee_code = s.employee_id or e.employee_code = s.employee_code
+join employee e on e.employee_code = s.employee_code
 on conflict (employee_id) do update
 set  available_mon = excluded.available_mon
    , available_tue = excluded.available_tue

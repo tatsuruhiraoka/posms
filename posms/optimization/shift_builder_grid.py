@@ -13,12 +13,12 @@ from openpyxl.cell.cell import Cell
 @dataclass(frozen=True)
 class GridLayout:
     sheet_name: str = "分担予定表(案)"
-    header_row: int = 22          # 日付が入っている行（テンプレに合わせて調整）
-    start_row: int = 23           # 1人目の上段行
-    name_col: int = 2             # B列=氏名（上段）
-    first_day_col: int = 3        # C列=1日目
-    last_day_col: int = 30        # AD列=28日目
-    empno_col: Optional[int] = 31 # AE列=社員番号（あれば。無ければ None に）
+    header_row: int = 22  # 日付が入っている行（テンプレに合わせて調整）
+    start_row: int = 23  # 1人目の上段行
+    name_col: int = 2  # B列=氏名（上段）
+    first_day_col: int = 3  # C列=1日目
+    last_day_col: int = 30  # AD列=28日目
+    empno_col: Optional[int] = 31  # AE列=社員番号（あれば。無ければ None に）
 
 
 def _cell_date_value(c: Cell) -> Optional[dt.date]:
@@ -66,7 +66,11 @@ def _iter_employees(ws, layout: GridLayout) -> List[Tuple[int, str, str]]:
 
         if layout.empno_col is not None:
             empno = ws.cell(row=r, column=layout.empno_col).value
-            emp_key = str(empno).strip() if empno is not None and str(empno).strip() != "" else name_s
+            emp_key = (
+                str(empno).strip()
+                if empno is not None and str(empno).strip() != ""
+                else name_s
+            )
         else:
             emp_key = name_s
 

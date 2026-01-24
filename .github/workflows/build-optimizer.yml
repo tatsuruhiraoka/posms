@@ -1,0 +1,45 @@
+name: Build POSMS Optimizer (macOS/Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "posms/optimization/**"
+      - "pyproject.toml"
+      - ".github/workflows/build-optimizer.yml"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        python-version: ["3.11"]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install optimizer deps + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[optimizer]"
+          pip install pyinstaller
+
+      - name: Build single-file binary
+        run: |
+          pyinstaller --onefile --name posms_optimizer -m posms.optimization.optimizer_entry
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: posms_optimizer-${{ matrix.os }}
+          path: |
+            dist/posms_optimizer*

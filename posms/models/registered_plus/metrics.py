@@ -14,4 +14,3 @@ def calc_metrics(y_true, y_pred) -> dict:
         "mae": float(mae),
         "rmse": float(rmse),
     }
-

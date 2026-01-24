@@ -70,6 +70,31 @@ docker-compose.override.yml
 # SQLite dev DBs (if any)
 *.sqlite3
 
+# =========================
+# Generated Excel workbooks
+# =========================
+
+# 班データ（2班以降は無視）
+excel_templates/[2-9]班データ*.xls*
+excel_templates/*班データ*.xls*
+
+# 分担表 / 勤務指定表（生成物）
+excel_templates/分担表*.xls*
+excel_templates/勤務指定表*.xls*
+
+# =========================
+# SQLite artifacts
+# =========================
+excel_templates/*.db
+excel_templates/*.db-wal
+excel_templates/*.db-shm
+
+# =========================
+# Keep portfolio Excel files
+# =========================
+!excel_templates/分担予定表(案).xlsm
+!excel_templates/1班データ.xlsm
+
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import logging
 import os
-import socket
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Iterator
@@ -121,8 +120,6 @@ class SessionManager:
           3) Docker コンテナ **内**なら `db:5432` を使う
           4) それ以外は SQLite（excel_templates/posms_demo.db）
         """
-        import os
-        from pathlib import Path
 
         # 1) 明示 URL 最優先
         database_url = os.getenv("DATABASE_URL")
@@ -131,15 +128,20 @@ class SessionManager:
 
         # 2) POSTGRES_* が **揃っていて HOST も明示**されている時だけ採用
         user = os.getenv("POSTGRES_USER") or os.getenv("DB_USER")
-        pwd  = os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD")
-        host = os.getenv("POSTGRES_HOST")                 # 既定は付けない（誤って localhost にならないように）
+        pwd = os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD")
+        host = os.getenv(
+            "POSTGRES_HOST"
+        )  # 既定は付けない（誤って localhost にならないように）
         port = os.getenv("POSTGRES_PORT") or "5432"
-        db   = os.getenv("POSTGRES_DB") or os.getenv("DB_NAME")
+        db = os.getenv("POSTGRES_DB") or os.getenv("DB_NAME")
         if all([user, pwd, db, host]):
             return URL.create(
                 "postgresql+psycopg2",
-                username=user, password=pwd,
-                host=host, port=int(port), database=db,
+                username=user,
+                password=pwd,
+                host=host,
+                port=int(port),
+                database=db,
             )
 
         # 3) Docker コンテナ内なら、compose のサービス名で接続
@@ -151,8 +153,11 @@ class SessionManager:
             pass
 
         # 4) フォールバックは SQLite（配布/Excelモード）
-        demo_path = Path(__file__).resolve().parents[2] / "excel_templates" / "posms_demo.db"
+        demo_path = (
+            Path(__file__).resolve().parents[2] / "excel_templates" / "posms_demo.db"
+        )
         return f"sqlite:///{demo_path}"
+
 
 # ---------------- Quick self-test ----------------
 if __name__ == "__main__":

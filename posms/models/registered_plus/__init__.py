@@ -37,13 +37,11 @@ __all__ = [
     "FEATURES_REGISTERED_PLUS",
     "build_registered_plus_features",
     "build_registered_plus_future_features",
-
     # core ML functions
     "train",
     "get_best_params",
     "predict",
     "calc_metrics",
-
     # pipeline
     "TrainResult",
     "ForecastResult",
