@@ -35,7 +35,7 @@ jobs:
 
       - name: Build single-file binary
         run: |
-          pyinstaller --onefile --name posms_optimizer -m posms.optimization.optimizer_entry
+          pyinstaller --onefile --name posms_optimizer posms/optimization/optimizer_entry.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
