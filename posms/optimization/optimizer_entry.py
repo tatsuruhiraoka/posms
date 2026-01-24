@@ -2,12 +2,33 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 # from posms.optimization.shift_builder_grid_solver import solve
 
 import pandas as pd
 
+
+def _cbc_path_from_meipass() -> str | None:
+    base = getattr(sys, "_MEIPASS", None)  # PyInstaller onefile 展開先
+    if not base:
+        return None
+
+    cand = os.path.join(base, "cbc")
+    cand_win = os.path.join(base, "cbc.exe")
+
+    if os.path.exists(cand):
+        try:
+            os.chmod(cand, 0o755)
+        except Exception:
+            pass
+        return cand
+
+    if os.path.exists(cand_win):
+        return cand_win
+
+    return None
 
 def _write_solution_csv(out_path: Path, rows: list[dict]) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,10 +111,12 @@ def main() -> int:
     alpha = float(inputs.get("alpha", 0.1))
     msg = bool(inputs.get("msg", True))
 
+    cbc_path = _cbc_path_from_meipass()
+
     sb = ShiftBuilderGrid(csv_dir=csvdir)
     sb.build()
-    sb.solve(alpha=alpha, msg=msg)
-
+    sb.solve(alpha=alpha, msg=msg, cbc_path=cbc_path)
+    
     # summary.json（デバッグ用）
     summary = sb.summary()
     outdir.mkdir(parents=True, exist_ok=True)

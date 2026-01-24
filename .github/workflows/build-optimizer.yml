@@ -33,9 +33,29 @@ jobs:
           pip install ".[optimizer]"
           pip install pyinstaller
 
-      - name: Build single-file binary
+      - name: Build single-file binary (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
-          pyinstaller --onefile --name posms_optimizer -m posms.optimization.optimizer_entry
+          CBC_PATH="$(python - <<'PY'
+          import pulp
+          print(pulp.PULP_CBC_CMD(msg=False).path)
+          PY
+          )"
+          echo "CBC_PATH=$CBC_PATH"
+          pyinstaller --onefile --name posms_optimizer \
+            --add-binary "${CBC_PATH}:cbc" \
+            posms/optimization/optimizer_entry.py
+
+      - name: Build single-file binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cbc = python -c "import pulp; print(pulp.PULP_CBC_CMD(msg=False).path)"
+          echo "CBC_PATH=$cbc"
+          pyinstaller --onefile --name posms_optimizer `
+            --add-binary "$cbc;cbc.exe" `
+            posms/optimization/optimizer_entry.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

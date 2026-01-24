@@ -1042,10 +1042,16 @@ class ShiftBuilderGrid:
         self._define_variables()
         self.add_constraints()
 
-    def solve(self, alpha: float = 0.1, msg: bool = True):
+    def solve(self, alpha: float = 0.1, msg: bool = True, cbc_path: str | None = None):
         self.set_objective(alpha=alpha)
         assert self.model is not None
-        status = self.model.solve(pulp.PULP_CBC_CMD(msg=msg))
+
+        solver = (
+            pulp.PULP_CBC_CMD(msg=msg, path=cbc_path)
+            if cbc_path
+            else pulp.PULP_CBC_CMD(msg=msg)
+        )
+        status = self.model.solve(solver)
         self.status = status
         self.status_name = pulp.LpStatus[status]
         return status
