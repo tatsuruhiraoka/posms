@@ -31,6 +31,7 @@ def _cbc_path_for_frozen() -> str | None:
 
     return None
 
+
 def _write_solution_csv(out_path: Path, rows: list[dict]) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
