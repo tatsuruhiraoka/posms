@@ -43,8 +43,8 @@ jobs:
           PY
           )"
           echo "CBC_PATH=$CBC_PATH"
-          pyinstaller --onefile --name posms_optimizer \
-            --add-binary "${CBC_PATH}:cbc" \
+          pyinstaller --name posms_optimizer \
+            --add-binary "${CBC_PATH}:." \
             posms/optimization/optimizer_entry.py
 
       - name: Build single-file binary (Windows)
@@ -53,8 +53,8 @@ jobs:
         run: |
           $cbc = python -c "import pulp; print(pulp.PULP_CBC_CMD(msg=False).path)"
           echo "CBC_PATH=$cbc"
-          pyinstaller --onefile --name posms_optimizer `
-            --add-binary "$cbc;cbc.exe" `
+          pyinstaller --name posms_optimizer `
+            --add-binary "$cbc;." `
             posms/optimization/optimizer_entry.py
 
       - name: Upload artifact

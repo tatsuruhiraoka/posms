@@ -10,11 +10,12 @@ from pathlib import Path
 import pandas as pd
 
 
-def _cbc_path_from_meipass() -> str | None:
-    base = getattr(sys, "_MEIPASS", None)  # PyInstaller onefile 展開先
-    if not base:
+def _cbc_path_for_frozen() -> str | None:
+    # PyInstaller onedir: 実行ファイルのあるフォルダに同梱される
+    if not getattr(sys, "frozen", False):
         return None
 
+    base = os.path.dirname(sys.executable)
     cand = os.path.join(base, "cbc")
     cand_win = os.path.join(base, "cbc.exe")
 
@@ -29,7 +30,6 @@ def _cbc_path_from_meipass() -> str | None:
         return cand_win
 
     return None
-
 
 def _write_solution_csv(out_path: Path, rows: list[dict]) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,7 +112,7 @@ def main() -> int:
     alpha = float(inputs.get("alpha", 0.1))
     msg = bool(inputs.get("msg", True))
 
-    cbc_path = _cbc_path_from_meipass()
+    cbc_path = _cbc_path_for_frozen()
 
     sb = ShiftBuilderGrid(csv_dir=csvdir)
     sb.build()

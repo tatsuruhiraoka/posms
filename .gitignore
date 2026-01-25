@@ -81,6 +81,7 @@ excel_templates/*班データ*.xls*
 # 分担表 / 勤務指定表（生成物）
 excel_templates/分担表*.xls*
 excel_templates/勤務指定表*.xls*
+excel_templates/export_csv/inputs_echo.json
 
 # =========================
 # SQLite artifacts
