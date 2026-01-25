@@ -11,23 +11,27 @@ import pandas as pd
 
 
 def _cbc_path_for_frozen() -> str | None:
-    # PyInstaller onedir: 実行ファイルのあるフォルダに同梱される
     if not getattr(sys, "frozen", False):
         return None
 
-    base = os.path.dirname(sys.executable)
-    cand = os.path.join(base, "cbc")
-    cand_win = os.path.join(base, "cbc.exe")
+    exe_dir = os.path.dirname(sys.executable)
 
-    if os.path.exists(cand):
-        try:
-            os.chmod(cand, 0o755)
-        except Exception:
-            pass
-        return cand
+    # onedir: _internal 配下に入る
+    candidates = [
+        os.path.join(exe_dir, "_internal", "cbc"),
+        os.path.join(exe_dir, "_internal", "cbc.exe"),
+        # 念のため直下も見る（将来変更対策）
+        os.path.join(exe_dir, "cbc"),
+        os.path.join(exe_dir, "cbc.exe"),
+    ]
 
-    if os.path.exists(cand_win):
-        return cand_win
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                os.chmod(p, 0o755)
+            except Exception:
+                pass
+            return p
 
     return None
 
