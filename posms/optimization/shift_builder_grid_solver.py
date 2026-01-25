@@ -1046,11 +1046,12 @@ class ShiftBuilderGrid:
         self.set_objective(alpha=alpha)
         assert self.model is not None
 
-        solver = (
-            pulp.PULP_CBC_CMD(msg=msg, path=cbc_path)
-            if cbc_path
-            else pulp.PULP_CBC_CMD(msg=msg)
-        )
+        if cbc_path:
+            # PuLP 2.8.0: パス指定は COIN_CMD を使う
+            solver = pulp.COIN_CMD(path=cbc_path, msg=msg)
+        else:
+            # 既定（環境に入っている CBC を探す）
+            solver = pulp.PULP_CBC_CMD(msg=msg)
         status = self.model.solve(solver)
         self.status = status
         self.status_name = pulp.LpStatus[status]
