@@ -1,4 +1,4 @@
-department_code,team_name,zone_name,operational_status,shift_type
+﻿department_code,team_name,zone_name,operational_status,shift_type
 DPT-A,1班,1区,通配,早番
 DPT-A,1班,2区,通配,日勤
 DPT-A,1班,3区,通配,日勤
@@ -21,7 +21,7 @@ DPT-A,2班,202,通配,早番
 DPT-A,2班,203,通配,早番
 DPT-A,2班,大口2,混合,早番
 DPT-A,2班,大口2-1,混合,日勤
-DPT-A,2班,5-2,混合,日勤
+DPT-A,2班,5月2日,混合,日勤
 DPT-A,2班,補助,混合,日勤
 DPT-A,2班,速早,混合,早番
 DPT-A,2班,速夜,混合,夜勤

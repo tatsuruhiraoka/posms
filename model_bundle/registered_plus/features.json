@@ -1,0 +1,9 @@
+[
+  "weekday",
+  "holiday",
+  "is_obon",
+  "is_nenmatsu",
+  "sum_lag_1",
+  "sum_rm7",
+  "sum_lag_7"
+]

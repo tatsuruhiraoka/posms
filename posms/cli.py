@@ -27,38 +27,31 @@ poetry run posms seed-masters
 
 from __future__ import annotations
 
-from datetime import date
-from pathlib import Path
-from enum import Enum
-from typing import Annotated
-
+# --- standard library ---
+import json
 import os
 import re
+from datetime import date
+from enum import Enum
+from pathlib import Path
 from shutil import copyfile
+from typing import Annotated
 
-import mlflow
-import numpy as np
+# --- third-party ---
 import pandas as pd
-import jpholiday
 import typer
 from sqlalchemy import inspect, text
 
-from .exporters.excel_exporter import write_dataframe_to_excel
+# --- local application ---
 from posms.utils.db import SessionManager
 
 app = typer.Typer(help="Postal Operation Shift-Management System CLI")
 
-# 既存の try/except ～ ダミー定義を丸ごと置き換え
-try:
-    from posms.optimization.shift_builder import OutputType  # 本物（あれば）
-except Exception:
-
-    class OutputType(str, Enum):  # Typer が扱える
-        分担表 = "分担表"
-        勤務指定表 = "勤務指定表"
-        分担表案 = "分担表案"
-
-
+class OutputType(str, Enum):  # Typer が扱える
+    分担表 = "分担表"
+    勤務指定表 = "勤務指定表"
+    分担表案 = "分担表案"
+    
 # ---------- Helper -------------------------------------------------
 def _default_template() -> Path:
     return Path("excel_templates/shift_template.xlsx")
@@ -67,22 +60,6 @@ def _default_template() -> Path:
 def _engine():
     """SessionManager 経由で Engine を取得（Postgres⇄SQLite 自動切替）"""
     return SessionManager().engine
-
-
-def _existing_tables_lower(eng) -> set[str]:
-    """接続先DBのテーブル名一覧（小文字）を返す。PostgreSQLはschema='public'を考慮。"""
-    insp = inspect(eng)
-    try:
-        if eng.dialect.name == "postgresql":
-            names = insp.get_table_names(schema="public")
-        else:
-            names = insp.get_table_names()
-    except Exception:
-        try:
-            names = insp.get_table_names()
-        except Exception:
-            names = []
-    return {str(t).lower() for t in names}
 
 
 def _has_table(eng, name: str) -> bool:
@@ -128,37 +105,6 @@ def _has_column(eng, table_name: str, column_name: str) -> bool:
             except Exception:
                 pass
     return column_name.lower() in names
-
-
-def _resolve_mailvolume_table(eng) -> str:
-    existing = _existing_tables_lower(eng)
-    if "mailvolume" in existing:
-        return "mailvolume"
-    if "mail_volume" in existing:
-        return "mail_volume"
-    return '"MailVolume"'  # 引用付きで作成された場合のフォールバック
-
-
-def _resolve_jobtype_table(eng) -> str:
-    existing = _existing_tables_lower(eng)
-    if "jobtype" in existing:
-        return "jobtype"
-    if "job_type" in existing:
-        return "job_type"
-    return '"JobType"'  # 大文字作成や引用付テーブルに対応
-
-
-def _season(ts: pd.Timestamp) -> int:
-    """1:春(3-5), 2:夏(6-8), 3:秋(9-11), 4:冬(12-2)"""
-    m = ts.month
-    return (
-        1 if m in (3, 4, 5) else 2 if m in (6, 7, 8) else 3 if m in (9, 10, 11) else 4
-    )
-
-
-def _is_hol(ts: pd.Timestamp) -> int:
-    return int(jpholiday.is_holiday(ts.date()))
-
 
 def _prepare_out_from_template(out: Path, template: Path) -> None:
     """
@@ -233,14 +179,21 @@ def _write_df_overwrite_sheet(
     sheet_name: str,
     template_path: Path | None = None,
     start_cell: str = "A1",
+    *,
+    clear_to_df_area_only: bool = True,
 ) -> None:
     """
-    Excelに「二重出力」させないための上書き書き込み。
+    Excelに「二重出力」させないための上書き書き込み（高速・安全版）。
 
-    - template_path があればそれを開く（無ければ out_path が存在すれば out を開く）
-    - sheet_name の start_cell から df を書く
-    - 既存データ領域は value を None にしてクリアしてから上書き（スタイルは極力残る）
+    改善点:
+    - 既存 ws.max_row / ws.max_column まで消しに行かない（テンプレが大きいと激遅になるため）
+    - df に必要な範囲だけをクリアして書き込む
     - xlsm は keep_vba=True でマクロ保持
+
+    clear_to_df_area_only=True:
+      クリア範囲 = dfの書き込みに必要な領域（推奨）
+    clear_to_df_area_only=False:
+      旧挙動に近く、ws.max_row/max_col まで広げてクリア（遅い可能性あり）
     """
     import openpyxl
     from openpyxl.utils.cell import coordinate_to_tuple
@@ -260,46 +213,102 @@ def _write_df_overwrite_sheet(
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = sheet_name
+        keep_vba = False
     else:
-        wb = openpyxl.load_workbook(
-            load_path, keep_vba=(load_path.suffix.lower() == ".xlsm")
-        )
-        if sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-        else:
-            ws = wb.create_sheet(sheet_name)
+        keep_vba = (load_path.suffix.lower() == ".xlsm")
+        wb = openpyxl.load_workbook(load_path, keep_vba=keep_vba)
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(sheet_name)
 
     start_row, start_col = coordinate_to_tuple(start_cell)
 
-    # クリア範囲（既存の最大 or 新規の必要範囲）
+    # --- df サイズ（ヘッダ行 + データ行）
     nrows = int(len(df.index))
     ncols = int(len(df.columns))
-    need_last_row = start_row + 1 + max(0, nrows)  # header + data
-    need_last_col = start_col + max(0, ncols - 1)
+    if ncols <= 0:
+        # 列が無いdfは何もしない（シートは作る/存在させる）
+        wb.save(out_path)
+        wb.close()
+        return
 
-    clear_last_row = max(ws.max_row, need_last_row)
-    clear_last_col = max(ws.max_column, need_last_col)
+    # 書き込み最終セル（ヘッダ1行分を含む）
+    last_row_needed = start_row + nrows  # header=start_row, data starts start_row+1, ends start_row+nrows
+    last_col_needed = start_col + (ncols - 1)
 
-    # 値クリア（スタイルは残す）
+    # --- クリア範囲の決定
+    if clear_to_df_area_only:
+        clear_last_row = last_row_needed
+        clear_last_col = last_col_needed
+    else:
+        clear_last_row = max(ws.max_row, last_row_needed)
+        clear_last_col = max(ws.max_column, last_col_needed)
+
+    # --- 値クリア（スタイルは残す）
+    # 必要範囲だけ消すので高速
     for r in range(start_row, clear_last_row + 1):
-        for c in range(start_col, clear_last_col + 1):
-            ws.cell(row=r, column=c).value = None
+        row_cells = ws.iter_rows(
+            min_row=r, max_row=r, min_col=start_col, max_col=clear_last_col
+        )
+        for cells in row_cells:
+            for cell in cells:
+                cell.value = None
 
-    # ヘッダ
+    # --- ヘッダ
     for j, col_name in enumerate(df.columns, start=start_col):
         ws.cell(row=start_row, column=j).value = str(col_name)
 
-    # データ
-    # NaN/NaT → None
-    values = df.to_numpy()
-    for i, row_vals in enumerate(values, start=start_row + 1):
-        for j, v in enumerate(row_vals, start=start_col):
-            if pd.isna(v):
+    # --- データ（NaN/NaT → None）
+    # itertuples は to_numpy より dtype 崩れにくく、行処理に向く
+    for i, row in enumerate(df.itertuples(index=False, name=None), start=start_row + 1):
+        for j, v in enumerate(row, start=start_col):
+            if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
                 v = None
             ws.cell(row=i, column=j).value = v
 
     wb.save(out_path)
     wb.close()
+    
+def _export_model_bundle_from_run(
+    *,
+    run_id: str,
+    kind: str,
+    feature_columns: list[str],
+    out_dir: Path = Path("model_bundle"),
+    experiment: str | None = None,
+) -> Path:
+    """
+    MLflow の run から model/model.xgb を取り出して model_bundle/<kind>/ を作る。
+    """
+    import mlflow
+    from mlflow.tracking import MlflowClient
+    tracking_uri = mlflow.get_tracking_uri()
+    client = MlflowClient(tracking_uri=tracking_uri)
+
+    dst = out_dir / kind
+    dst.mkdir(parents=True, exist_ok=True)
+
+    # model.xgb を取得（あなたの保存形式に合わせる：artifact_path="model" / file="model.xgb"）
+    local = client.download_artifacts(run_id, "model/model.xgb", dst.as_posix())
+    src = Path(local)
+    (dst / "model.xgb").write_bytes(src.read_bytes())
+
+    # 特徴量列（順序が大事）
+    (dst / "features.json").write_text(
+        json.dumps(list(feature_columns), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    meta = {
+        "run_id": run_id,
+        "mail_kind": kind,
+        "experiment": experiment,
+        "tracking_uri": tracking_uri,
+    }
+    (dst / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return dst
 
 
 # ---------- Commands ----------------------------------------------
@@ -333,11 +342,9 @@ def run_monthly(
         "output_type": output_type.value,
         "excel_template": str(excel_template),
     }
-    # refresh or train（モジュール側で分岐）
-    try:
-        from posms.flows.monthly_flow import monthly_refresh as _monthly
-    except ImportError:
-        from posms.flows.monthly_flow import monthly_train as _monthly
+    from posms.flows import monthly_flow as mf
+
+    _monthly = getattr(mf, "monthly_refresh", None) or getattr(mf, "monthly_train")
     _monthly(**params)
 
 
@@ -350,310 +357,368 @@ def train_model(
     max_depth: Annotated[int, typer.Option(help="XGBoost 木の深さ")] = 6,
 ):
     """DB を使ってモデルを学習し、MLflowに保存。normal + registered_plus を両方実行。"""
+    import os
+    from pathlib import Path
+
+    import pandas as pd
+    import typer
+    from mlflow.tracking import MlflowClient
+
     # 遅延 import（export系の import 連鎖を防ぐ）
     from posms.features.builder import FeatureBuilder
     from posms.models.normal.trainer import ModelTrainer as NormalTrainer
-    from posms.models.registered_plus.trainer import ModelTrainer as RegPlusTrainer
+    from posms.models.registered_plus.pipeline import train_from_hist as rp_train_from_hist
+    from posms.models.registered_plus.features import FEATURES_REGISTERED_PLUS
+
+    # ====== 重要：モデル名を分離（事故防止） ======
+    MODEL_NAME_NORMAL = "posms_normal"
+    MODEL_NAME_REGPLUS = "posms_registered_plus"
+    experiment = os.getenv("MLFLOW_EXPERIMENT_NAME", "posms")
 
     params = {"n_estimators": n_estimators, "max_depth": max_depth}
 
+    # -------------------------
     # normal
+    # -------------------------
     fb_n = FeatureBuilder(office_id=office_id, mail_kind="normal")
     Xn, yn = fb_n.build()
-    run_id_normal = NormalTrainer(params).train(Xn, yn)
 
-    # registered_plus（同じ Engine を共有）
-    fb_r = FeatureBuilder(
-        office_id=office_id, mail_kind="registered_plus", engine=fb_n.engine
+    tags_normal = {
+        "model_name": MODEL_NAME_NORMAL,
+        "mail_kind": "normal",
+        "office_id": str(fb_n.office_id),
+        "feature_set": ",".join(map(str, list(Xn.columns))),
+    }
+
+    run_id_normal = NormalTrainer(params=params, experiment=experiment).train(
+        Xn,
+        yn,
+        auto_register=False,
+        tags=tags_normal,
     )
-    Xr, yr = fb_r.build()
-    run_id_regplus = RegPlusTrainer(params).train(Xr, yr)
 
-    typer.echo(f"MLflow run_id normal: {run_id_normal}")
-    typer.echo(f"MLflow run_id registered_plus: {run_id_regplus}")
+    # -------------------------
+    # registered_plus（registered + lp_plus の sum）
+    # -------------------------
+    fb_reg = FeatureBuilder(office_id=fb_n.office_id, mail_kind="registered", engine=fb_n.engine)
+    fb_lp  = FeatureBuilder(office_id=fb_n.office_id, mail_kind="lp_plus",    engine=fb_n.engine)
+    
+    reg = fb_reg._load_mail()[["date", "actual_volume"]].rename(columns={"actual_volume": "registered"})
+    lp  = fb_lp._load_mail()[["date", "actual_volume"]].rename(columns={"actual_volume": "lp_plus"})
+    
+    m = reg.merge(lp, on="date", how="outer").sort_values("date").fillna(0)
+    m["sum"] = m["registered"] + m["lp_plus"]
+    
+    # 学習用（index=DatetimeIndex、sumを含む）
+    df_hist = m.set_index(pd.to_datetime(m["date"]))[["registered", "lp_plus", "sum"]]
 
+    tags_rp = {
+        "model_name": MODEL_NAME_REGPLUS,
+        "mail_kind": "registered_plus",
+        "office_id": str(fb_n.office_id),
+        "feature_set": ",".join(map(str, list(FEATURES_REGISTERED_PLUS))),
+    }
+
+    res = rp_train_from_hist(
+        df_hist=df_hist,
+        experiment_name=experiment,
+        run_name=f"{MODEL_NAME_REGPLUS}-office{fb_n.office_id}",
+        tags=tags_rp,
+        model_name=MODEL_NAME_REGPLUS,
+    )
+    run_id_regplus = res.run_id if hasattr(res, "run_id") else res
+
+    # ===== model_bundle 自動生成 =====
+    out_root = Path("model_bundle")
+
+    bundle_n = _export_model_bundle_from_run(
+        run_id=run_id_normal,
+        kind="normal",
+        feature_columns=list(Xn.columns),
+        out_dir=out_root,
+        experiment=experiment,
+    )
+
+    bundle_rp = _export_model_bundle_from_run(
+        run_id=run_id_regplus,
+        kind="registered_plus",
+        feature_columns=list(FEATURES_REGISTERED_PLUS),
+        out_dir=out_root,
+        experiment=experiment,
+    )
+
+    # ===== タグ存在チェック（必ず刻む）=====
+    client = MlflowClient()
+    for rid in [run_id_normal, run_id_regplus]:
+        run_tags = client.get_run(rid).data.tags
+        for k in ["model_name", "mail_kind", "office_id", "feature_set"]:
+            if k not in run_tags:
+                raise RuntimeError(f"missing tag {k} in run {rid}")
+
+    typer.echo(f"✅ model_bundle(normal): {bundle_n}")
+    typer.echo(f"✅ model_bundle(registered_plus): {bundle_rp}")
 
 @app.command("forecast")
 def forecast_4weeks(
-    start: Annotated[str, typer.Option("--start", "-s", help="予測開始日 YYYY-MM-DD")],
-    days: Annotated[int, typer.Option("--days", "-n", help="予測日数（既定=28）")] = 28,
-    office_id: Annotated[
-        int | None, typer.Option("--office-id", help="局ID（1局のみなら省略可）")
-    ] = None,
-    run_id: Annotated[
-        str | None,
-        typer.Option(
-            "--run-id", help="使用する学習 run_id。未指定なら Production/最新run"
-        ),
-    ] = None,
-    stage: Annotated[
-        str, typer.Option("--stage", help="Model Registry ステージ名")
-    ] = "Production",
-    mail_kind: Annotated[
-        str, typer.Option("--mail-kind", help="normal / registered_plus")
-    ] = "normal",
+    start: Annotated[str, typer.Option("--start", "-s", help="YYYY-MM-DD")],
+    days: Annotated[int, typer.Option("--days", "-n")] = 28,
+    office_id: Annotated[int | None, typer.Option("--office-id")] = None,
+    mail_kind: Annotated[str, typer.Option("--mail-kind")] = "normal",
 ):
-    """
-    学習済みモデルで、指定開始日から days 日分のローリング予測を行い、
-    MailVolume.forecast_volume を更新します。
-    """
-    # 遅延 import（export系の import 連鎖を防ぐ）
-    from posms.features.builder import FEATURE_COLUMNS, FeatureBuilder
+    import sys
+    import numpy as np
+    import pandas as pd
+    import jpholiday
+    import xgboost as xgb
+    from sqlalchemy import text
+
+    from posms.features.builder import FeatureBuilder, FEATURE_COLUMNS
+    from posms.models.predictor import ModelPredictor
+
+    # ------------------------------------------------------------
+    # SQLite DATABASE_URL 自動設定（空DB事故防止）
+    # ------------------------------------------------------------
+    if not os.getenv("DATABASE_URL"):
+        p = os.getenv("POSMS_DB_PATH")
+        if p:
+            db_path = Path(p).expanduser().resolve()
+        else:
+            base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
+            db_path = (base / "posms.db").resolve()
+
+        if not db_path.exists():
+            raise RuntimeError(
+                f"DB connection info is incomplete.\n"
+                f"SQLite file not found: {db_path}\n"
+                f"Set DATABASE_URL or POSMS_DB_PATH."
+            )
+
+        os.environ["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
 
     if mail_kind not in ("normal", "registered_plus"):
-        raise typer.BadParameter(f"Unknown mail_kind: {mail_kind}")
+        raise typer.BadParameter(mail_kind)
 
-    # 特徴量（DBから）
-    fb = FeatureBuilder(office_id=office_id, mail_kind=mail_kind)
-    eng = fb.engine
-    MV = _resolve_mailvolume_table(eng)
-
-    if office_id is None:
-        try:
-            # FeatureBuilder が中で解決してくれていれば使う
-            if getattr(fb, "office_id", None) is not None:
-                office_id = int(fb.office_id)
-            else:
-                from sqlalchemy import text as _t
-
-                with eng.begin() as con:
-                    rows = con.execute(
-                        _t(f"SELECT DISTINCT office_id FROM {MV} ORDER BY office_id")
-                    ).fetchall()
-                if len(rows) == 1:
-                    office_id = int(rows[0][0])
-                elif len(rows) == 0:
-                    typer.secho(
-                        "MailVolume にレコードがありません。先に学習用データを投入してください。",
-                        err=True,
-                    )
-                    raise typer.Exit(code=1)
-                else:
-                    ids = ", ".join(str(r[0]) for r in rows)
-                    typer.secho(
-                        f"複数の office_id が見つかりました: [{ids}]  --office-id を指定してください。",
-                        err=True,
-                    )
-                    raise typer.Exit(code=2)
-        except Exception as e:
-            typer.secho(f"office_id 自動解決に失敗: {e}", err=True)
-            raise typer.Exit(code=3)
-
-    # 期間の行が無ければ作る（actual=NULL, forecast=NULL, price_increase_flagは既存値/無ければ0）
     start_ts = pd.to_datetime(start).normalize()
-    targets = pd.date_range(start_ts, periods=days, freq="D")
+    end_ts = start_ts + pd.Timedelta(days=days - 1)
 
-    with eng.begin() as con:
-        df_flags = pd.read_sql(
-            text(
-                f'SELECT "date", price_increase_flag FROM {MV} WHERE office_id=:o AND "date" BETWEEN :d1 AND :d2'
-            ),
-            con,
-            params={"o": office_id, "d1": targets[0], "d2": targets[-1]},
-            parse_dates=["date"],
-        ).set_index("date")
-        for dt in targets:
-            val = (
-                df_flags["price_increase_flag"].get(dt) if not df_flags.empty else None
-            )
-            if isinstance(val, (bool, np.bool_)):
-                flag = bool(val)
-            elif val is None or (isinstance(val, float) and np.isnan(val)):  # 欠損など
-                flag = False
-            else:
-                # 0/1 や '0'/'1' が来ても安全に解釈
-                flag = bool(int(val))
-            con.execute(
-                text(
-                    f'INSERT INTO {MV} ("date", office_id, actual_volume, forecast_volume, price_increase_flag) '
-                    f"VALUES (:d, :o, NULL, NULL, :f) "
-                    f'ON CONFLICT ("date", office_id) DO NOTHING'
-                ),
-                {"d": dt.date(), "o": int(office_id), "f": flag},
-            )
+    # ------------------------------------------------------------
+    # DB engine / office_id 解決（FeatureBuilder の仕様に従う）
+    # ------------------------------------------------------------
+    fb_base = FeatureBuilder(office_id=office_id, mail_kind="normal")
+    eng = fb_base.engine
 
-    # 既存の系列（actual）で進め、未来は予測で埋めながらローリング
-    hist = fb._load_mail().set_index("date").sort_index()
-    vol = hist["actual_volume"].astype("float").copy()
+    # office_id が None のままなら、normal の _load_mail が自動選択 or 例外
+    _ = fb_base._load_mail()
+    office_id = int(fb_base.office_id)
 
-    updates: list[tuple[date, int]] = []
-    for ts in targets:
-        prev_1 = ts - pd.Timedelta(days=1)
-        prev_7 = ts - pd.Timedelta(days=7)
-        if prev_1 not in vol.index or prev_7 not in vol.index:
-            continue
-        last7 = vol.loc[ts - pd.Timedelta(days=7) : ts - pd.Timedelta(days=1)]
-        if len(last7) < 7 or last7.isna().any():
-            continue
+    # ------------------------------------------------------------
+    # DB 行保証
+    # ------------------------------------------------------------
+    def ensure_rows(kind: str, d1: pd.Timestamp, d2: pd.Timestamp):
+        with eng.begin() as con:
+            for d in pd.date_range(d1, d2, freq="D"):
+                con.execute(
+                    text(
+                        """
+                        INSERT INTO mailvolume_by_type
+                          ("date", office_id, mail_kind, actual_volume, forecast_volume)
+                        VALUES
+                          (:d, :o, :k, NULL, NULL)
+                        ON CONFLICT ("date", office_id, mail_kind) DO NOTHING
+                        """
+                    ),
+                    {"d": d.date(), "o": office_id, "k": kind},
+                )
 
-        flag = (
-            int(hist["price_increase_flag"].get(ts, 0))
-            if "price_increase_flag" in hist.columns
-            else 0
+    # ==========================================================
+    # normal（rolling + posms_normal）
+    # ==========================================================
+    if mail_kind == "normal":
+        from posms.models.rolling import rolling_forecast_28d
+    
+        # FeatureBuilder は特徴量生成だけ
+        fb = FeatureBuilder(office_id=office_id, mail_kind="normal", engine=eng)
+    
+        # 予測器
+        pred = ModelPredictor(
+            model_name="posms_normal",
+            mail_kind="normal",
+            office_id=int(office_id),
+            experiment=os.getenv("MLFLOW_EXPERIMENT_NAME", "posms"),
+            tracking_uri=os.getenv("MLFLOW_TRACKING_URI"),
+            stage=None,
         )
-        _ = pd.DataFrame(
-            [
-                {
-                    "dow": ts.weekday(),
-                    "dow_sin": np.sin(2 * np.pi * ts.weekday() / 7.0),
-                    "dow_cos": np.cos(2 * np.pi * ts.weekday() / 7.0),
-                    "is_holiday": _is_hol(ts),
-                    "is_after_holiday": _is_hol(ts - pd.Timedelta(days=1)),
-                    "is_after_after_holiday": _is_hol(ts - pd.Timedelta(days=2)),
-                    "month": ts.month,
-                    "season": _season(ts),
-                    "lag_1": float(vol.loc[prev_1]),
-                    "lag_7": float(vol.loc[prev_7]),
-                    "rolling_mean_7": float(last7.mean()),
-                    "is_new_year": int(ts.month == 1 and 1 <= ts.day <= 3),
-                    "is_obon": int(ts.month == 8 and 13 <= ts.day <= 16),
-                    "price_increase_flag": flag,
-                }
-            ]
-        )[FEATURE_COLUMNS]
-
-        # 予測器は FeatureBuilder 側（mail_kind別）で解決
-        yhat_raw = float(
-            fb.predict(
-                target_date=ts.date(),
-                run_id=run_id,
-                stage=stage,
-                model_name="posms",
-                tracking_uri=None,
-            )
+    
+        # rolling
+        res = rolling_forecast_28d(
+            fb=fb,
+            predictor=pred,
+            start=start_ts.date(),
+            days=days,
+            context_days=7,
         )
-
-        # 負の予測は 0 にクリップ（count系のため）
-        yhat = max(0.0, yhat_raw)
-        vol.loc[ts] = yhat  # 次日の特徴量計算のために予測値を採用
-        updates.append((ts.date(), int(round(yhat))))
-
-    # 書き戻し
-    if updates:
+    
+        # start〜end の範囲だけ切り出し（date型を正規化してから比較）
+        df_out = res.df.copy()
+        df_out["date"] = pd.to_datetime(df_out["date"]).dt.normalize()
+        df_out = df_out[(df_out["date"] >= start_ts) & (df_out["date"] <= end_ts)].copy()
+    
+        if df_out.empty:
+            typer.echo("更新対象なし（rolling出力が空）")
+            return
+    
+        # raw（日次の発生量予測）: y_pred優先、NaNはy_filledで補完
+        if "y_pred" not in df_out.columns or "y_filled" not in df_out.columns:
+            raise RuntimeError(f"rolling result missing y_pred/y_filled. cols={list(df_out.columns)}")
+    
+        raw = df_out.set_index("date")["y_pred"].astype(float)
+        raw = raw.fillna(df_out.set_index("date")["y_filled"].astype(float))
+        raw = raw.asfreq("D")
+    
+        # ------------------------------------------------------------
+        # 丸め + 土日祝繰越（配達量へ変換）
+        # ------------------------------------------------------------
+        df_deliver = ModelPredictor.apply_delivery_rules(
+            raw,
+            round_to_thousand=True,
+            extend_to_next_delivery=True,
+        )
+    
+        df_deliver["date"] = pd.to_datetime(df_deliver["date"]).dt.normalize()
+        df_deliver = df_deliver[(df_deliver["date"] >= start_ts) & (df_deliver["date"] <= end_ts)].copy()
+    
+        updates = [(d.date(), int(v)) for d, v in zip(df_deliver["date"], df_deliver["deliver_pred"])]
+    
+        if not updates:
+            typer.echo("更新対象なし（予測結果が空）")
+            return
+    
+        # 行保証（UPDATE対象が無い事故防止）
+        ensure_rows("normal", pd.Timestamp(updates[0][0]), pd.Timestamp(updates[-1][0]))
+    
+        # 書き戻し
         with eng.begin() as con:
             for d, v in updates:
                 con.execute(
                     text(
-                        f'UPDATE {MV} SET forecast_volume=:v, updated_at=NOW() WHERE "date"=:d AND office_id=:o'
+                        """
+                        UPDATE mailvolume_by_type
+                           SET forecast_volume=:v
+                         WHERE "date"=:d AND office_id=:o AND mail_kind='normal'
+                        """
                     ),
                     {"v": v, "d": d, "o": int(office_id)},
                 )
+    
         typer.echo(
-            f"forecast_volume 更新: {len(updates)} 件（mail_kind={mail_kind}, office_id={office_id}, {targets[0].date()}〜{targets[-1].date()}）"
+            f"forecast_volume 更新: {len(updates)} 件 "
+            f"(mail_kind=normal, office_id={office_id}, {start_ts.date()}〜{end_ts.date()})"
         )
-    else:
-        typer.echo("更新対象なし（直近実績不足 or 行未作成）")
-
-    typer.echo(f"MLflow: {mlflow.get_tracking_uri()}")
+        return
 
 
-@app.command("optimize")
-def optimize_shift(
-    date_str: Annotated[str, typer.Option("--date", "-d")] = str(date.today()),
-    output_type: Annotated[
-        OutputType,
-        typer.Option(help="分担表 / 勤務指定表 / 分担表案", case_sensitive=False),
-    ] = OutputType.分担表,
-    template: Annotated[
-        Path, typer.Option("--template", "-t", help="Excel テンプレート")
-    ] = _default_template(),
-):
-    from posms.optimization.shift_builder import ShiftBuilder
-    from posms.features.builder import FeatureBuilder
-
-    """需要予測済みデータを入力にシフトのみ再最適化"""
-    demand = FeatureBuilder(mail_kind="normal").predict(
-        date_str
-    )  # 既定 run_id を内部でロード
-    staff = FeatureBuilder(mail_kind="normal").load_staff()
-    out = ShiftBuilder(template).build(demand, staff, output_type)
-    typer.echo(f"Excel saved → {out.resolve()}")
-
-
-@app.command("export-excel")
-def export_excel(
-    sql: str = typer.Option(
-        None, "--sql", help="実行するSQL。--query-fileとどちらか必須"
-    ),
-    query_file: Path = typer.Option(
-        None, "--query-file", exists=True, help="SQLファイルパス。--sqlとどちらか必須"
-    ),
-    out: Path = typer.Option(
-        Path("dist/shift_report.xlsx"), "--out", help="出力先 .xlsx"
-    ),
-    sheet: str = typer.Option("export", "--sheet", help="書き込み先シート名"),
-    template: Path = typer.Option(
-        None, "--template", help="テンプレ .xlsx（未指定なら空ブック）"
-    ),
-    start_cell: str = typer.Option("A1", "--start-cell", help="開始セル（例:A1）"),
-    header_map: str | None = typer.Option(
-        None,
-        "--header-map",
-        help="英=日 をカンマ区切りで指定。例: employee_code=社員コード,name=氏名,team_name=班",
-    ),
-    append: bool = typer.Option(False, "--append", help="既存の .xlsx にシートを追記"),
-    sort_by: str | None = typer.Option(
-        None, "--sort-by", help="カンマ区切りの列名で昇順ソート"
-    ),
-    sort_natural: str | None = typer.Option(
-        None, "--sort-natural", help="自然順ソートする列名（例: 社員番号, zone_code）"
-    ),
-):
-    """
-    任意のSQL結果をテンプレ(任意)へ「値だけ」書き込んで .xlsx を生成する。
-    相手PCは“開くだけ”。ODBC/PowerQuery/マクロは不要。
-    """
-    if not sql and not query_file:
-        typer.echo("ERROR: --sql または --query-file のいずれかを指定してください。")
-        raise typer.Exit(code=2)
-
-    if query_file and not sql:
-        sql = Path(query_file).read_text(encoding="utf-8")
-
-    # header_map 解析
-    header_map_dict = None
-    if header_map:
-        header_map_dict = {}
-        for kv in header_map.split(","):
-            if "=" in kv:
-                k, v = kv.split("=", 1)
-                header_map_dict[k.strip()] = v.strip()
-
-    engine = _engine()  # DATABASE_URL から接続
-    with engine.connect() as conn:
-        df = pd.read_sql(text(sql), conn)
-
-    if sort_by:
-        cols = [c.strip() for c in sort_by.split(",") if c.strip()]
-        df = df.sort_values(cols)
-
-    if sort_natural:
-        col = sort_natural.strip()
-        if col in df.columns:
-            key = (
-                df[col]
-                .astype(str)
-                .str.extract(r"(\d+)", expand=False)
-                .fillna("0")
-                .astype(int)
-            )
-            df = (
-                df.assign(__key__=key)
-                .sort_values(["__key__", col])
-                .drop(columns="__key__")
-            )
-
-    write_dataframe_to_excel(
-        df=df,
-        out_path=Path(out),
-        sheet_name=sheet,
-        template_path=Path(template) if template else None,
-        header_map=header_map_dict,
-        start_cell=start_cell,
-        append=append,
+    # ==========================================================
+    # registered_plus（繰越なし：raw をそのまま DB に書く）
+    # ※ DB の registered + lp_plus を合算して自己回帰ローリング
+    # ==========================================================
+    from posms.models.registered_plus.features import (
+        FEATURES_REGISTERED_PLUS,
+        build_registered_plus_feature_row,
     )
-    typer.echo(f"✅ Exported: {out}")
+    from posms.models.predictor import ModelPredictor
+    
+    # 予測器（あなたの標準呼び出し）
+    pred = ModelPredictor(
+        model_name="posms_registered_plus",
+        mail_kind="registered_plus",
+        office_id=int(office_id),
+        experiment=os.getenv("MLFLOW_EXPERIMENT_NAME", "posms"),
+        tracking_uri=os.getenv("MLFLOW_TRACKING_URI"),
+        stage=None,
+    )
+    
+    # DBから実績を取る（mail_kind: registered / lp_plus）
+    def _load_kind(kind: str) -> pd.Series:
+        sql = """
+            SELECT "date", actual_volume
+              FROM mailvolume_by_type
+             WHERE office_id=:o AND mail_kind=:k
+             ORDER BY "date"
+        """
+        df = pd.read_sql(text(sql), eng, params={"o": office_id, "k": kind}, parse_dates=["date"])
+        if df.empty:
+            raise RuntimeError(f"registered_plus: no rows for mail_kind={kind!r}")
+        s = df.set_index("date")["actual_volume"].astype(float)
+        s.index = pd.to_datetime(s.index).normalize()
+        return s
+    
+    s_reg = _load_kind("registered")
+    s_lp = _load_kind("lp_plus")
+    
+    # 合算系列（過去実績）
+    vol = s_reg.add(s_lp, fill_value=0.0).sort_index()
+    
+    last_actual_date = vol.dropna().index.max()
+    if last_actual_date is None:
+        raise RuntimeError("registered_plus: base series is empty")
+    
+    # 実績翌日から予測で埋める（start が先ならギャップも内部で埋める）
+    bridge_start = pd.to_datetime(last_actual_date).normalize() + pd.Timedelta(days=1)
+    start_for_pred = bridge_start if start_ts > bridge_start else start_ts
+    full_dates = pd.date_range(start_for_pred, end_ts, freq="D")
+    
+    # 連続化（未来まで index を用意）
+    full_idx = pd.date_range(vol.index.min(), end_ts, freq="D")
+    vol = vol.reindex(full_idx).fillna(0.0)
+    
+    updates: dict[pd.Timestamp, float] = {}
+    
+    for dt in full_dates:
+        feat_dict = build_registered_plus_feature_row(dt, vol)
+    
+        # 列順は FEATURES_REGISTERED_PLUS（唯一の真実）
+        X = pd.DataFrame([feat_dict])[list(FEATURES_REGISTERED_PLUS)].astype(float)
+    
+        yhat = float(pred.predict(X)[0])
+        yhat = max(0.0, yhat)
+    
+        # 次の日の lag 用に vol を更新（registered_plus は繰越しない）
+        vol.loc[pd.to_datetime(dt).normalize()] = yhat
+        updates[pd.to_datetime(dt).normalize()] = yhat
+    
+    s_pred = pd.Series(updates).sort_index()
+    s_pred = s_pred[(s_pred.index >= start_ts) & (s_pred.index <= end_ts)]
+    
+    if s_pred.empty:
+        typer.echo("更新対象なし（直近実績不足 or 特徴量不足）")
+        return
+    
+    df_w = s_pred.rename("forecast_volume").reset_index().rename(columns={"index": "date"})
+    df_w["date"] = pd.to_datetime(df_w["date"]).dt.normalize()
+    df_w["forecast_volume"] = df_w["forecast_volume"].astype(float).clip(lower=0.0).round().astype(int)
+    
+    ensure_rows("registered_plus", df_w["date"].min(), df_w["date"].max())
+    
+    with eng.begin() as con:
+        for _, r in df_w.iterrows():
+            con.execute(
+                text(
+                    """
+                    UPDATE mailvolume_by_type
+                       SET forecast_volume=:v
+                     WHERE "date"=:d AND office_id=:o AND mail_kind='registered_plus'
+                    """
+                ),
+                {"v": int(r["forecast_volume"]), "d": pd.to_datetime(r["date"]).date(), "o": int(office_id)},
+            )
+    
+    typer.echo(
+        f"forecast_volume 更新: {len(df_w)} 件 "
+        f"(mail_kind=registered_plus, office_id={office_id}, {start_ts.date()}〜{end_ts.date()})"
+    )
+    return
 
+    
 
 @app.command("export-sheet-employees")
 def export_sheet_employees(
@@ -1001,8 +1066,8 @@ def export_sheet_jobtypes_regular(
     sheet: str = typer.Option("勤務種別(正社員)", "--sheet"),
 ):
     eng = _engine()
-    JT = _resolve_jobtype_table(eng)
-    jt_for_inspect = _strip_quotes(JT)
+    JT = "jobtype"
+    jt_for_inspect = JT
 
     has_disp = _has_column(eng, jt_for_inspect, "display_order")
     disp_select = (
@@ -1048,8 +1113,8 @@ def export_sheet_jobtypes_fixedterm(
     sheet: str = typer.Option("勤務種別(期間雇用)", "--sheet"),
 ):
     eng = _engine()
-    JT = _resolve_jobtype_table(eng)
-    jt_for_inspect = _strip_quotes(JT)
+    JT = "jobtype"
+    jt_for_inspect = JT
 
     has_disp = _has_column(eng, jt_for_inspect, "display_order")
     disp_select = (

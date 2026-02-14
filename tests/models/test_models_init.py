@@ -15,7 +15,7 @@ def test_normal_model_public_api_exists():
 
     # normal の公開クラスが存在すること
     trainer_mod = importlib.import_module("posms.models.normal.trainer")
-    predictor_mod = importlib.import_module("posms.models.normal.predictor")
+    predictor_mod = predictor_mod = importlib.import_module("posms.models.predictor")
 
     assert hasattr(trainer_mod, "ModelTrainer")
     assert hasattr(predictor_mod, "ModelPredictor")

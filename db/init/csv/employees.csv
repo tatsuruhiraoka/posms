@@ -1,4 +1,4 @@
-employee_code,name,employment_type,position,is_leader ,is_vice_leader,default_work_hours,monthly_work_hours,department_code,team_name,is_certifier
+﻿employee_code,name,employment_type,position,is_leader ,is_vice_leader,default_work_hours,monthly_work_hours,department_code,team_name,is_certifier
 1,社員1_1,正社員,課長代理,1,0,8,160,DPT-A,1班,1
 2,社員1_2,正社員,主任,0,0,8,160,DPT-A,1班,0
 3,社員1_3,正社員,主任,0,0,8,160,DPT-A,1班,0

@@ -1,0 +1,72 @@
+Metadata-Version: 2.4
+Name: posms
+Version: 0.1.0
+Summary: 郵便物数予測とシフト自動作成を統合した MLOps パイプライン
+License: Copyright (c) 2025 Tatsuru Hiraoka
+         All rights reserved.
+License-File: LICENSE
+Author: Tatsuru Hiraoka
+Requires-Python: >=3.11,<3.12
+Classifier: License :: Other/Proprietary License
+Classifier: Programming Language :: Python :: 3
+Provides-Extra: optimizer
+Requires-Dist: dvc[s3] (==3.50.*)
+Requires-Dist: fastapi (==0.111.*)
+Requires-Dist: griffe (<1)
+Requires-Dist: jpholiday (==0.1.*)
+Requires-Dist: jpholiday (==0.1.*) ; extra == "optimizer"
+Requires-Dist: matplotlib (>=3.7)
+Requires-Dist: mlflow (==2.16.*)
+Requires-Dist: numpy (==1.26.*)
+Requires-Dist: numpy (==1.26.*) ; extra == "optimizer"
+Requires-Dist: openpyxl (==3.1.*)
+Requires-Dist: optuna (>=3.5)
+Requires-Dist: pandas (==2.2.*)
+Requires-Dist: pandas (==2.2.*) ; extra == "optimizer"
+Requires-Dist: pendulum (==2.1.2)
+Requires-Dist: prefect (==2.18.3)
+Requires-Dist: psycopg2-binary (==2.9.*)
+Requires-Dist: pulp (==2.8.*)
+Requires-Dist: pulp (==2.8.*) ; extra == "optimizer"
+Requires-Dist: pydantic (==2.6.4)
+Requires-Dist: pydantic-core (==2.16.3)
+Requires-Dist: python-dotenv (==1.0.*)
+Requires-Dist: pyyaml (==6.0.*)
+Requires-Dist: scikit-learn (==1.4.*)
+Requires-Dist: scipy (==1.13.*)
+Requires-Dist: sqlalchemy (==2.0.*)
+Requires-Dist: typer (==0.12.*)
+Requires-Dist: uvicorn[standard] (==0.28.*)
+Requires-Dist: xgboost (==2.0.*)
+Requires-Dist: xlsxwriter (==3.2.*)
+Requires-Dist: xlwings (>=0.30)
+Description-Content-Type: text/markdown
+
+# postal-operation-shift-management-system
+
+郵便物数の予測とシフト最適化を組み合わせた最小構成のデモプロジェクトです。
+
+## ゼロ設定 MLflow
+
+学習と推論は追加設定なしで動作します。トラッキングサーバを設定していない場合、実行結果はローカルの `mlruns/` ディレクトリに保存されます。外部の MLflow サーバを使う場合は、ライブラリを呼び出す前に環境変数 `MLFLOW_TRACKING_URI` を設定してください。Model Registry が利用できない（例: ローカルの file ストア）環境では、Predictor は自動的に対象 Experiment 内の最新 run にフォールバックします。
+
+## クイックスタート（ゼロ設定）
+
+```bash
+# 1) インストール例
+pip install -e .          # もしくは: poetry install
+
+# 2) 最小の学習＆推論
+python - <<'PY'
+from posms.models import ModelTrainer, ModelPredictor
+import pandas as pd, numpy as np
+X = pd.DataFrame({"x": np.arange(50)})
+y = X["x"] * 2 + 1 + np.random.randn(50)*0.1
+run_id = ModelTrainer().train(X, y)          # ./mlruns に保存
+pred   = ModelPredictor().predict(X.head())  # Registry 不可 → 最新 run にフォールバック
+print("run_id:", run_id, "pred_shape:", pred.shape)
+PY
+
+# (任意) ローカルで実行履歴を閲覧
+mlflow ui --backend-store-uri mlruns
+
