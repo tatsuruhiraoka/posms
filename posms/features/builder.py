@@ -3,12 +3,11 @@
 posms.features.builder
 ======================
 
-FeatureBuilder（MailVolume + jpholiday 対応）
+FeatureBuilder（mailvolume_by_type + jpholiday 対応 / 固定）
 
-- 単一 office_id の系列を DB から取得（DATABASE_URL か POSTGRES_* で接続）
-- 種別（mail_kind）:
-    - mailvolume_by_type がある場合は mail_kind で絞り込む
-    - 旧 MailVolume テーブルの場合は mail_kind を無視（後方互換）
+前提（設計固定）:
+- テーブルは mailvolume_by_type を使用する（後方互換・自動探索はしない）
+- office_id + mail_kind で 1 本の系列を扱う
 - 特徴量:
     dow, dow_sin, dow_cos,
     is_holiday, is_after_holiday, is_after_after_holiday,
@@ -16,7 +15,7 @@ FeatureBuilder（MailVolume + jpholiday 対応）
     lag_1, lag_7, rolling_mean_7,
     is_new_year, is_obon,
     price_increase_flag
-- 学習用 (X, y) と、単一日の予測 API を提供
+- 学習用 (X, y) と、期間フレーム生成 API を提供（予測は別レイヤ）
 """
 
 from __future__ import annotations
@@ -30,10 +29,12 @@ from typing import Optional, List
 import numpy as np
 import pandas as pd
 import jpholiday
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, Engine
 
 LOGGER = logging.getLogger(__name__)
+
+MAIL_TABLE = "mailvolume_by_type"
 
 FEATURE_COLUMNS: List[str] = [
     "dow",
@@ -61,8 +62,7 @@ class FeatureBuilder:
         対象局 ID。None の場合、データ内に 1 局しか無ければ自動選択。
         複数局が存在するのに未指定なら例外。
     mail_kind : str
-        対象の郵便種別。mailvolume_by_type.mail_kind の値（normal, registered_plus, ...）。
-        旧 MailVolume テーブルを使う場合は無視される。
+        mailvolume_by_type.mail_kind の値（normal, registered_plus, ...）
     base_dir : Path | None
         （将来拡張用）プロジェクトルート推定に使用。
     engine : sqlalchemy.engine.Engine | None
@@ -80,38 +80,12 @@ class FeatureBuilder:
         self.office_id = office_id
         self.mail_kind = mail_kind
         self.engine = engine or self._make_engine_from_env()
+
         LOGGER.info(
             "FeatureBuilder initialized. db=%s office_id=%s mail_kind=%s",
             self.engine.url,
             self.office_id,
             self.mail_kind,
-        )
-
-    # ------------------------- Predictor 解決 -------------------------
-    def _resolve_predictor_class(self):
-        """
-        mail_kind に応じて ModelPredictor クラスを返す。
-
-        NOTE:
-        - posms.models のトップレベル re-export に依存しない（入口が壊れやすい）
-        - 必要になるまで import しない（CLI/export系の import 連鎖を防ぐ）
-        """
-        mk = (self.mail_kind or "normal").lower()
-
-        if mk == "normal":
-            from posms.models.normal.predictor import ModelPredictor
-
-            return ModelPredictor
-
-        if mk == "registered_plus":
-            from posms.models.registered_plus.predictor import ModelPredictor
-
-            return ModelPredictor
-
-        # 将来拡張（yu_packet 等）を追加する場合はここに追記
-        raise ValueError(
-            f"Unsupported mail_kind for predictor: {self.mail_kind!r}. "
-            f"supported=['normal', 'registered_plus']"
         )
 
     # ------------------------- DB 接続 -------------------------
@@ -140,129 +114,67 @@ class FeatureBuilder:
             )
         return create_engine(url, pool_pre_ping=True, future=True)
 
-    # ----------------------- テーブル解決 ----------------------
-    def _resolve_mail_table_name(self) -> str:
-        """
-        実在テーブル名を自動解決（大文字/小文字/別名に頑健）。
-
-        優先順位:
-        - mailvolume_by_type / "MailVolumeByType"
-        - mailvolume / "MailVolume" / mail_volume
-        """
-        insp = inspect(self.engine)
-
-        # SQLite と Postgres で get_table_names の呼び方を変える
-        if insp.dialect.name == "sqlite":
-            existing = set(insp.get_table_names())
-        else:
-            # Postgres 等（public スキーマ）
-            existing = set(insp.get_table_names(schema="public"))
-
-        def norm(s: str) -> str:
-            return s.replace('"', "").lower()
-
-        candidates = [
-            "mailvolume_by_type",
-            '"MailVolumeByType"',
-            "mailvolume",
-            '"MailVolume"',
-            "mail_volume_by_type",
-            "mail_volume",
-        ]
-        existing_norm = {t.lower() for t in existing}
-        for c in candidates:
-            if norm(c) in existing_norm:
-                return c
-        raise RuntimeError(
-            f"MailVolume/ByType テーブルが見つかりません。存在テーブル={sorted(existing)} / 期待候補={candidates}"
-        )
-
     # ----------------------- データ読み込み ---------------------
     def _load_mail(self) -> pd.DataFrame:
         """
-        MailVolume / MailVolumeByType から系列を読み込み。
-        必要列: date, office_id, actual_volume, price_increase_flag
-        """
-        tbl = self._resolve_mail_table_name()
-        tbl_norm = tbl.replace('"', "").lower()
+        mailvolume_by_type から系列を読み込み。
 
-        if "mailvolume_by_type" in tbl_norm:
-            # ---- 種別別テーブル（mailvolume_by_type） ----
-            if self.office_id is not None:
-                sql = f"""
-                    SELECT "date", office_id, actual_volume, price_increase_flag
-                    FROM {tbl}
-                    WHERE office_id = :office_id
-                      AND mail_kind = :mail_kind
-                    ORDER BY "date"
-                """
-                df = pd.read_sql(
-                    text(sql),
-                    self.engine,
-                    params={"office_id": self.office_id, "mail_kind": self.mail_kind},
-                    parse_dates=["date"],
-                )
-            else:
-                # office_id 未指定時：1局だけなら自動で選ぶ（従来仕様を踏襲）
-                sql = f"""
-                    SELECT "date", office_id, actual_volume, price_increase_flag
-                    FROM {tbl}
-                    WHERE mail_kind = :mail_kind
-                    ORDER BY office_id, "date"
-                """
-                df = pd.read_sql(
-                    text(sql),
-                    self.engine,
-                    params={"mail_kind": self.mail_kind},
-                    parse_dates=["date"],
-                )
-                n_offices = df["office_id"].nunique() if not df.empty else 0
-                if n_offices == 0:
-                    raise ValueError(
-                        f"MailVolumeByType(mail_kind={self.mail_kind}) が空です。データを投入してください。"
-                    )
-                if n_offices > 1:
-                    raise ValueError(
-                        "office_id を指定してください（複数局のデータが存在します）。"
-                    )
-                self.office_id = int(df["office_id"].iloc[0])
-                df = df[df["office_id"] == self.office_id].copy()
+        必要列:
+          - date
+          - office_id
+          - mail_kind
+          - actual_volume
+          - price_increase_flag
+
+        NOTE:
+        - office_id が None の場合、mail_kind で絞った結果が 1局だけなら自動選択
+          2局以上なら例外
+        """
+        mk = (self.mail_kind or "normal").lower()
+
+        if self.office_id is not None:
+            sql = f"""
+                SELECT "date", office_id, actual_volume, price_increase_flag
+                FROM {MAIL_TABLE}
+                WHERE office_id = :office_id
+                  AND mail_kind = :mail_kind
+                ORDER BY "date"
+            """
+            df = pd.read_sql(
+                text(sql),
+                self.engine,
+                params={"office_id": self.office_id, "mail_kind": mk},
+                parse_dates=["date"],
+            )
         else:
-            # ---- 旧 MailVolume テーブル（後方互換用）----
-            if self.office_id is not None:
-                sql = f"""
-                    SELECT "date", office_id, actual_volume, price_increase_flag
-                    FROM {tbl}
-                    WHERE office_id = :office_id
-                    ORDER BY "date"
-                """
-                df = pd.read_sql(
-                    text(sql),
-                    self.engine,
-                    params={"office_id": self.office_id},
-                    parse_dates=["date"],
+            sql = f"""
+                SELECT "date", office_id, actual_volume, price_increase_flag
+                FROM {MAIL_TABLE}
+                WHERE mail_kind = :mail_kind
+                ORDER BY office_id, "date"
+            """
+            df = pd.read_sql(
+                text(sql),
+                self.engine,
+                params={"mail_kind": mk},
+                parse_dates=["date"],
+            )
+
+            n_offices = df["office_id"].nunique() if not df.empty else 0
+            if n_offices == 0:
+                raise ValueError(
+                    f"{MAIL_TABLE}(mail_kind={mk}) が空です。データを投入してください。"
                 )
-            else:
-                sql = f"""
-                    SELECT "date", office_id, actual_volume, price_increase_flag
-                    FROM {tbl}
-                    ORDER BY office_id, "date"
-                """
-                df = pd.read_sql(text(sql), self.engine, parse_dates=["date"])
-                n_offices = df["office_id"].nunique() if not df.empty else 0
-                if n_offices == 0:
-                    raise ValueError("MailVolume が空です。データを投入してください。")
-                if n_offices > 1:
-                    raise ValueError(
-                        "office_id を指定してください（複数局のデータが存在します）。"
-                    )
-                self.office_id = int(df["office_id"].iloc[0])
-                df = df[df["office_id"] == self.office_id].copy()
+            if n_offices > 1:
+                raise ValueError(
+                    "office_id を指定してください（複数局のデータが存在します）。"
+                )
+            self.office_id = int(df["office_id"].iloc[0])
+            df = df[df["office_id"] == self.office_id].copy()
 
         if df.empty:
             raise ValueError(
-                f"対象テーブル {tbl} に office_id={self.office_id}, "
-                f"mail_kind={getattr(self, 'mail_kind', None)} のデータがありません。"
+                f"{MAIL_TABLE} に office_id={self.office_id}, mail_kind={mk} のデータがありません。"
             )
 
         # price_increase_flag を 0/1 に正規化（欠損は 0）
@@ -283,9 +195,9 @@ class FeatureBuilder:
         戻り値: 0/1 int Series（name='is_holiday' として返す）
         """
         dates = pd.to_datetime(dates)
-        is_pub_holiday = dates.dt.date.map(
-            lambda d: bool(jpholiday.is_holiday(d))
-        ).astype(int)
+        is_pub_holiday = dates.dt.date.map(lambda d: bool(jpholiday.is_holiday(d))).astype(
+            int
+        )
         is_weekend = (dates.dt.weekday >= 5).astype(int)
         non_working = ((is_pub_holiday == 1) | (is_weekend == 1)).astype(int)
         return non_working.rename("is_holiday")
@@ -293,30 +205,34 @@ class FeatureBuilder:
     # ----------------------- 特徴量生成 ------------------------
     @staticmethod
     def _assign_season(ts: pd.Timestamp) -> int:
-        """
-        1: 春 (3–5), 2: 夏 (6–8), 3: 秋 (9–11), 4: 冬 (12–2)
-        """
+        """1: 春 (3–5), 2: 夏 (6–8), 3: 秋 (9–11), 4: 冬 (12–2)"""
         m = int(ts.month)
         if m in (3, 4, 5):
             return 1
-        elif m in (6, 7, 8):
+        if m in (6, 7, 8):
             return 2
-        elif m in (9, 10, 11):
+        if m in (9, 10, 11):
             return 3
-        else:
-            return 4
+        return 4
 
     @staticmethod
     def _is_new_year(ts: pd.Timestamp) -> int:
-        # 正月（1/1-1/3）
+        """正月（1/1-1/3）"""
         return int(ts.month == 1 and 1 <= ts.day <= 3)
 
     @staticmethod
     def _is_obon(ts: pd.Timestamp) -> int:
-        # お盆（8/13-8/16）
+        """お盆（8/13-8/16）"""
         return int(ts.month == 8 and 13 <= ts.day <= 16)
 
-    def _add_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _add_features(self, df: pd.DataFrame, *, y_col: str = "actual_volume") -> pd.DataFrame:
+        """
+        df に特徴量列を追加して返す。
+
+        y_col:
+            lag/rolling 計算の元となる系列列。
+            将来、予測値で埋めた列（例：y_filled）を渡せるようにするために可変化している。
+        """
         df = df.copy()
 
         # dow & cyclic encoding
@@ -324,28 +240,30 @@ class FeatureBuilder:
         df["dow_sin"] = np.sin(2 * np.pi * df["dow"] / 7.0)
         df["dow_cos"] = np.cos(2 * np.pi * df["dow"] / 7.0)
 
-        # month & season（1:春=3-5, 2:夏=6-8, 3:秋=9-11, 4:冬=12-2）
+        # month & season
         df["month"] = df["date"].dt.month
         df["season"] = df["date"].apply(self._assign_season).astype(int)
 
-        # holiday flags（jpholiday）
-        hol = self._is_holiday_series(df["date"])
-        df = df.join(hol)
-        df["is_after_holiday"] = df["is_holiday"].shift(1, fill_value=0).astype(int)
-        df["is_after_after_holiday"] = (
-            df["is_holiday"].shift(2, fill_value=0).astype(int)
-        )
+        # holiday flags（jpholiday + weekend）
+        # NOTE: rolling で _add_features を繰り返し呼んでも衝突しないように join ではなく代入にする
+        hol = self._is_holiday_series(df["date"]).to_numpy()
+        df["is_holiday"] = hol
+        df["is_after_holiday"] = pd.Series(df["is_holiday"]).shift(1, fill_value=0).astype(int).to_numpy()
+        df["is_after_after_holiday"] = pd.Series(df["is_holiday"]).shift(2, fill_value=0).astype(int).to_numpy()
 
         # event flags
         df["is_new_year"] = df["date"].apply(self._is_new_year).astype(int)
         df["is_obon"] = df["date"].apply(self._is_obon).astype(int)
 
         # lags & rolling
-        df["lag_1"] = df["actual_volume"].shift(1)
-        df["lag_7"] = df["actual_volume"].shift(7)
-        df["rolling_mean_7"] = df["actual_volume"].shift(1).rolling(7).mean()
+        if y_col not in df.columns:
+            raise ValueError(f"y_col={y_col!r} not found in df columns={list(df.columns)}")
 
-        # price flag は _load_mail で 0/1 化済み
+        df["lag_1"] = df[y_col].shift(1)
+        df["lag_7"] = df[y_col].shift(7)
+        df["rolling_mean_7"] = df[y_col].shift(1).rolling(7).mean()
+
+        # 未来行などで列欠けが起きても落とさない保険
         for c in FEATURE_COLUMNS:
             if c not in df.columns:
                 df[c] = 0
@@ -354,16 +272,68 @@ class FeatureBuilder:
 
     def _features_df(self, *, dropna: bool) -> pd.DataFrame:
         base = self._load_mail()
-        out = self._add_features(base)
+        out = self._add_features(base, y_col="actual_volume")
         if dropna:
             # 学習では特徴量の欠損行を落とし、目的変数も欠損なしに限定
             out = out.dropna(subset=FEATURE_COLUMNS + ["actual_volume"])
+        return out.reset_index(drop=True)
+
+    # ----------------------- 期間フレーム生成 ---------------------
+    def build_frame(
+        self,
+        date_min: str | date,
+        date_max: str | date,
+        *,
+        include_future: bool = True,
+        y_col: str = "actual_volume",
+    ) -> pd.DataFrame:
+        """
+        指定期間 [date_min, date_max] の「日次連番」フレームを返す。
+
+        - DB に存在しない日付も、include_future=True なら行として生成する
+          （actual_volume は NaN、price_increase_flag は 0）
+        - lag/rolling の元系列は y_col で指定（将来、予測値で埋めた列を使える）
+        """
+        base = self._load_mail()
+
+        d1 = pd.to_datetime(str(date_min)).normalize()
+        d2 = pd.to_datetime(str(date_max)).normalize()
+        if d2 < d1:
+            raise ValueError(f"date_max must be >= date_min: {d1.date()}..{d2.date()}")
+
+        # 期間で切り出し（実績がある範囲は保持）
+        base = base[(base["date"] >= d1) & (base["date"] <= d2)].copy()
+
+        if include_future:
+            idx = pd.date_range(d1, d2, freq="D")
+            base = base.set_index("date").reindex(idx)
+            base.index.name = "date"
+            base = base.reset_index()
+
+            # office_id を埋める
+            if "office_id" not in base.columns or base["office_id"].isna().all():
+                base["office_id"] = self.office_id
+            else:
+                base["office_id"] = base["office_id"].ffill().bfill().fillna(self.office_id)
+
+            # 未来日の price_increase_flag は 0 扱い
+            if "price_increase_flag" not in base.columns:
+                base["price_increase_flag"] = 0
+            base["price_increase_flag"] = base["price_increase_flag"].fillna(0).astype(int)
+
+        if y_col not in base.columns:
+            raise ValueError(
+                f"y_col={y_col!r} not found in frame columns={list(base.columns)}"
+            )
+
+        out = self._add_features(base, y_col=y_col)
         return out.reset_index(drop=True)
 
     # ------------------------- 外部 API -------------------------
     def build(self) -> tuple[pd.DataFrame, pd.Series]:
         """
         学習データを返す。
+
         Returns
         -------
         X : pandas.DataFrame（FEATURE_COLUMNS の順序で固定）
@@ -378,72 +348,15 @@ class FeatureBuilder:
     def build_with_dates(self, *, dropna: bool = True) -> pd.DataFrame:
         """
         解析/デバッグ用に、日付・目的変数・特徴量を含む DataFrame を返す。
-        dropna=False にすると将来日の行も残す（actual_volume が NULL のまま）。
+        dropna=False にすると特徴量欠損の行も残す（ただし _load_mail は実績のみなので通常は少ない）
         """
         df = self._features_df(dropna=dropna)
         cols = ["date", "office_id", "actual_volume"] + FEATURE_COLUMNS
         return df[cols]
 
-    def predict(
-        self,
-        target_date: str | date,
-        *,
-        run_id: Optional[str] = None,
-        stage: Optional[str] = "Production",
-        model_name: str = "posms",
-        tracking_uri: Optional[str] = None,
-    ) -> float:
-        """
-        単一日の予測値を返す（office_id 固定）。
-
-        既存 DB に対象日の行が存在しなくても、履歴から 1 行合成して特徴量を作る
-        （lag/rolling は履歴ベース）。直近の実績が不足している場合はエラー。
-        """
-        base = self._load_mail()
-        tgt = pd.to_datetime(str(target_date)).date()
-
-        # 対象日行が無ければ 1 行合成（actual_volume=NULL, price_increase_flag=0）
-        if (base["date"].dt.date == tgt).sum() == 0:
-            new_row = {
-                "date": pd.Timestamp(tgt),
-                "office_id": self.office_id,
-                "actual_volume": np.nan,
-                "price_increase_flag": 0,
-            }
-            base = pd.concat(
-                [base, pd.DataFrame([new_row])],
-                ignore_index=True,
-            ).sort_values("date")
-
-        # 特徴量作成（dropna しない）
-        all_df = self._add_features(base).reset_index(drop=True)
-        row = all_df.loc[all_df["date"].dt.date == tgt]
-        if row.empty:
-            raise ValueError(
-                f"対象日の行が作成できませんでした: date={tgt}, office_id={self.office_id}"
-            )
-
-        # 必要特徴量が欠損なら学習時と同等の入力がつくれない
-        if row[FEATURE_COLUMNS].isna().any(axis=None):
-            raise ValueError(
-                "対象日の特徴量に欠損があります。直近の実績（前日および過去7日）と祝日情報を投入してください。"
-            )
-
-        X_row = row[FEATURE_COLUMNS].astype(float)
-
-        Predictor = self._resolve_predictor_class()
-        pred = Predictor(
-            run_id=run_id,
-            stage=stage,
-            model_name=model_name,
-            tracking_uri=tracking_uri,
-        ).predict(X_row)[0]
-
-        LOGGER.info(
-            "Predict %s → %.2f (office_id=%s, mail_kind=%s)",
-            tgt,
-            pred,
-            self.office_id,
-            self.mail_kind,
+    # NOTE: predict() は廃止（予測は別レイヤに移す）
+    def predict(self, *args, **kwargs) -> float:  # pragma: no cover
+        raise RuntimeError(
+            "FeatureBuilder.predict() is deprecated. "
+            "Use rolling forecast pipeline (forecast_4weeks / ModelPredictor) instead."
         )
-        return float(pred)

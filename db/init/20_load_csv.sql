@@ -133,42 +133,27 @@ set  demand_mon     = excluded.demand_mon
 commit;
 
 ------------------------------------------------------------
--- 4) mailvolume / mailvolume_by_type  (postal_datas.csv)
---   columns:
---     日付, 通常郵便, 書留, ゆうパケット, レターパックライト,
---     レターパックプラス, 特定記録, ゆうパック, eパケット,
---     EMS, 年賀組立, 年賀配達
+-- 4) mailvolume_by_type  (postal_datas.csv)
+--   columns: date,normal,registered,lp_plus,nenga_assembly,nenga_delivery
 ------------------------------------------------------------
 \if :{?office_code} \else \set office_code 'HQ' \endif
 
 drop table if exists stage_postal_datas;
 create temp table stage_postal_datas (
-  date             date,
-  normal           int,
-  kakitome         int,
-  yu_packet        int,
-  letterpack_light int,
-  letterpack_plus  int,
-  tokutei_kiroku   int,
-  yu_pack          int,
-  e_packet         int,
-  ems              int,
-  nenga_assembly   int,
-  nenga_delivery   int
+  date           date,
+  normal         int,
+  registered     int,
+  lp_plus        int,
+  nenga_assembly int,
+  nenga_delivery int
 );
 
--- ★ 日本語ヘッダーの列をこの順番で読み取る
+-- ★ 英語ヘッダーをこの順番で読み取る（CSVと一致させる）
 copy stage_postal_datas (
   date,
   normal,
-  kakitome,
-  yu_packet,
-  letterpack_light,
-  letterpack_plus,
-  tokutei_kiroku,
-  yu_pack,
-  e_packet,
-  ems,
+  registered,
+  lp_plus,
   nenga_assembly,
   nenga_delivery
 )
@@ -177,127 +162,51 @@ with (format csv, header true, encoding 'UTF8');
 
 begin;
 
--------------------------------------------------------------------
--- 4) mailvolume_by_type（種別別データを全部入れる）
----------------------------------------------------------------------- 通常郵便
+-- 通常
 insert into mailvolume_by_type (
   date, office_id, mail_kind,
   actual_volume, forecast_volume, price_increase_flag,
-  created_at, updated_at)
+  created_at, updated_at
+)
 select s.date, o.office_id, 'normal',
        s.normal, null, 0, now(), now()
 from stage_postal_datas s
 join office o on o.office_code = :'office_code'
 where s.normal is not null
 on conflict (date, office_id, mail_kind)
-  do update set actual_volume = excluded.actual_volume,
-                forecast_volume = excluded.forecast_volume,
-                price_increase_flag = excluded.price_increase_flag,
-                updated_at = now();
+do update set
+  actual_volume        = excluded.actual_volume,
+  forecast_volume      = excluded.forecast_volume,
+  price_increase_flag  = excluded.price_increase_flag,
+  updated_at           = now();
 
 -- 書留
-insert into mailvolume_by_type 
-select s.date, o.office_id, 'kakitome',
-       s.kakitome, null, 0, now(), now()
-from stage_postal_datas s
-join office o on o.office_code = :'office_code'
-where s.kakitome is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
-
--- ゆうパケット
 insert into mailvolume_by_type
-select s.date, o.office_id, 'yu_packet',
-       s.yu_packet, null, 0, now(), now()
+select s.date, o.office_id, 'registered',
+       s.registered, null, 0, now(), now()
 from stage_postal_datas s
 join office o on o.office_code = :'office_code'
-where s.yu_packet is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
-
--- レターパックライト
-insert into mailvolume_by_type
-select s.date, o.office_id, 'letterpack_light',
-       s.letterpack_light, null, 0, now(), now()
-from stage_postal_datas s
-join office o on o.office_code = :'office_code'
-where s.letterpack_light is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
+where s.registered is not null
+on conflict (date, office_id, mail_kind)
+do update set
+  actual_volume        = excluded.actual_volume,
+  forecast_volume      = excluded.forecast_volume,
+  price_increase_flag  = excluded.price_increase_flag,
+  updated_at           = now();
 
 -- レターパックプラス
 insert into mailvolume_by_type
-select s.date, o.office_id, 'letterpack_plus',
-       s.letterpack_plus, null, 0, now(), now()
+select s.date, o.office_id, 'lp_plus',
+       s.lp_plus, null, 0, now(), now()
 from stage_postal_datas s
 join office o on o.office_code = :'office_code'
-where s.letterpack_plus is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
-
--- 特定記録
-insert into mailvolume_by_type
-select s.date, o.office_id, 'tokutei_kiroku',
-       s.tokutei_kiroku, null, 0, now(), now()
-from stage_postal_datas s
-join office o on o.office_code = :'office_code'
-where s.tokutei_kiroku is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
-
--- ゆうパック
-insert into mailvolume_by_type
-select s.date, o.office_id, 'yu_pack',
-       s.yu_pack, null, 0, now(), now()
-from stage_postal_datas s
-join office o on o.office_code = :'office_code'
-where s.yu_pack is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
-
--- eパケット
-insert into mailvolume_by_type
-select s.date, o.office_id, 'e_packet',
-       s.e_packet, null, 0, now(), now()
-from stage_postal_datas s
-join office o on o.office_code = :'office_code'
-where s.e_packet is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
-
--- EMS
-insert into mailvolume_by_type
-select s.date, o.office_id, 'ems',
-       s.ems, null, 0, now(), now()
-from stage_postal_datas s
-join office o on o.office_code = :'office_code'
-where s.ems is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
+where s.lp_plus is not null
+on conflict (date, office_id, mail_kind)
+do update set
+  actual_volume        = excluded.actual_volume,
+  forecast_volume      = excluded.forecast_volume,
+  price_increase_flag  = excluded.price_increase_flag,
+  updated_at           = now();
 
 -- 年賀組立
 insert into mailvolume_by_type
@@ -306,11 +215,12 @@ select s.date, o.office_id, 'nenga_assembly',
 from stage_postal_datas s
 join office o on o.office_code = :'office_code'
 where s.nenga_assembly is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
+on conflict (date, office_id, mail_kind)
+do update set
+  actual_volume        = excluded.actual_volume,
+  forecast_volume      = excluded.forecast_volume,
+  price_increase_flag  = excluded.price_increase_flag,
+  updated_at           = now();
 
 -- 年賀配達
 insert into mailvolume_by_type
@@ -319,11 +229,12 @@ select s.date, o.office_id, 'nenga_delivery',
 from stage_postal_datas s
 join office o on o.office_code = :'office_code'
 where s.nenga_delivery is not null
-on conflict (date, office_id, mail_kind) do update
-set actual_volume = excluded.actual_volume,
-    forecast_volume = excluded.forecast_volume,
-    price_increase_flag = excluded.price_increase_flag,
-    updated_at = now();
+on conflict (date, office_id, mail_kind)
+do update set
+  actual_volume        = excluded.actual_volume,
+  forecast_volume      = excluded.forecast_volume,
+  price_increase_flag  = excluded.price_increase_flag,
+  updated_at           = now();
 
 commit;
 

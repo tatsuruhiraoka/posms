@@ -105,7 +105,7 @@ create table employee (
 create table mailvolume_by_type (
   date date not null,
   office_id int not null references office(office_id),
-  mail_kind text not null,          -- normal / kakitome / yu_packet / ... を入れる
+  mail_kind text not null,
   actual_volume int,
   forecast_volume int,
   price_increase_flag int not null default 0,

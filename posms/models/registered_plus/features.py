@@ -1,7 +1,8 @@
-# posms/model/registered_plus/features.py
-
+# posms/models/registered_plus/features.py
 from __future__ import annotations
+
 import pandas as pd
+import jpholiday
 
 TARGET = "registered_plus"
 
@@ -15,28 +16,85 @@ FEATURES_REGISTERED_PLUS = [
     "sum_lag_7",
 ]
 
+# 旧/新の列名ゆらぎをここで吸収（features.py が唯一の入口）
+_COMPONENT_COL_CANDIDATES = [
+    ("registered", "lp_plus"),             # 新名
+    ("書留", "レターパックプラス"),        # 旧名（日本語）
+]
+
+
+def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("index が DatetimeIndex である必要があります")
+    # normalize して日次として扱う
+    df = df.copy()
+    df.index = pd.to_datetime(df.index).normalize()
+    return df
+
+
+def _compute_flags(idx: pd.DatetimeIndex) -> pd.DataFrame:
+    """registered_plus 用のフラグを index から計算（唯一の定義）。"""
+    s_holiday = idx.map(lambda ts: int(jpholiday.is_holiday(ts.date())))
+    s_obon = idx.map(lambda ts: int(ts.month == 8 and 13 <= ts.day <= 16))
+    s_nenmatsu = idx.map(
+        lambda ts: int((ts.month == 12 and ts.day >= 20) or (ts.month == 1 and ts.day <= 7))
+    )
+    return pd.DataFrame(
+        {
+            "holiday": s_holiday.astype(int),
+            "is_obon": s_obon.astype(int),
+            "is_nenmatsu": s_nenmatsu.astype(int),
+        },
+        index=idx,
+    )
+
+
+def _resolve_components(df: pd.DataFrame) -> tuple[str, str] | None:
+    """df に含まれる registered_plus 構成列（2本）を特定する。"""
+    cols = set(df.columns)
+    for a, b in _COMPONENT_COL_CANDIDATES:
+        if a in cols and b in cols:
+            return a, b
+    return None
+
 
 def build_registered_plus_features(df_hist: pd.DataFrame) -> pd.DataFrame:
     """
     （学習用）過去データから registered_plus 用特徴量を作る。
+
+    入力 df_hist：
+    - index: DatetimeIndex
+    - columns:
+        - 2本の構成列（registered/lp_plus または 書留/レターパックプラス）
+          もしくは sum がある
+        - holiday/is_obon/is_nenmatsu はあってもなくてもよい（無ければここで計算）
     """
-    df = df_hist.copy()
+    df = _ensure_datetime_index(df_hist)
 
-    df[TARGET] = df["書留"] + df["レターパックプラス"]
+    # weekday（唯一の定義）
+    df["weekday"] = df.index.weekday.astype(int)
 
-    if not isinstance(df.index, pd.DatetimeIndex):
-        raise ValueError("index が DatetimeIndex である必要があります")
+    # フラグ（無ければ計算、あれば上書きせず正規化）
+    flags = _compute_flags(df.index)
+    for c in ["holiday", "is_obon", "is_nenmatsu"]:
+        if c not in df.columns:
+            df[c] = flags[c]
+        df[c] = df[c].fillna(flags[c]).astype(int)
 
-    df["weekday"] = df.index.weekday
-
-    for col in ["holiday", "is_obon", "is_nenmatsu"]:
-        if col not in df.columns:
-            df[col] = 0
-        df[col] = df[col].fillna(0).astype(int)
-
+    # sum の用意（無ければ構成列から作る）
     if "sum" not in df.columns:
-        raise ValueError("df_hist に 'sum' 列（総物数）が必要です")
+        comp = _resolve_components(df)
+        if comp is None:
+            raise ValueError("df_hist に 'sum' が無く、構成列（registered/lp_plus or 書留/レターパックプラス）も見つかりません")
+        a, b = comp
+        df["sum"] = df[a].fillna(0).astype(float) + df[b].fillna(0).astype(float)
+    else:
+        df["sum"] = df["sum"].fillna(0).astype(float)
 
+    # TARGET（学習目的変数）
+    df[TARGET] = df["sum"].astype(float)
+
+    # lag/rolling（唯一の定義）
     df["sum_lag_1"] = df["sum"].shift(1)
     df["sum_lag_7"] = df["sum"].shift(7)
     df["sum_rm7"] = df["sum"].shift(1).rolling(7).mean()
@@ -45,58 +103,38 @@ def build_registered_plus_features(df_hist: pd.DataFrame) -> pd.DataFrame:
     return df_feat
 
 
-def build_registered_plus_future_features(
-    df_all: pd.DataFrame,
-    pred_start_date: pd.Timestamp,
-) -> pd.DataFrame:
+def build_registered_plus_feature_row(dt: pd.Timestamp, sum_series: pd.Series) -> dict:
     """
-    （予測用）過去+未来を含む df_all から、未来日用の特徴量を作る。
+    （CLIの自己回帰ローリング用）
+    1日分の registered_plus 特徴量を作る。
 
-    Parameters
-    ----------
-    df_all : pd.DataFrame
-        index: DatetimeIndex（連続した日付）
-        columns:
-          - 'sum'（過去は実績、未来は通常モデルの予測値）
-          - 'holiday', 'is_obon', 'is_nenmatsu'（なければ 0 補完）
-    pred_start_date : pd.Timestamp
-        「ここから先を registered_plus で予測する」開始日。
-        例: pd.Timestamp("2026-01-01")
-
-    Returns
-    -------
-    df_future_feat : pd.DataFrame
-        未来日のみを index に持ち、
-        FEATURES_REGISTERED_PLUS をすべて含む DataFrame。
+    sum_series:
+      index=日付（DatetimeIndex, 日次）, value=sum（実績＋予測で埋めた系列）
     """
-    df = df_all.copy()
+    dt = pd.to_datetime(dt).normalize()
 
-    if not isinstance(df.index, pd.DatetimeIndex):
-        raise ValueError("index が DatetimeIndex である必要があります")
+    # series 側も正規化
+    s = sum_series.copy()
+    if not isinstance(s.index, pd.DatetimeIndex):
+        s.index = pd.to_datetime(s.index)
+    s.index = pd.to_datetime(s.index).normalize()
 
-    # 曜日
-    df["weekday"] = df.index.weekday
+    lag_1 = float(s.get(dt - pd.Timedelta(days=1), 0.0))
+    lag_7 = float(s.get(dt - pd.Timedelta(days=7), 0.0))
 
-    # フラグ類（無ければ 0）
-    for col in ["holiday", "is_obon", "is_nenmatsu"]:
-        if col not in df.columns:
-            df[col] = 0
-        df[col] = df[col].fillna(0).astype(int)
+    last7 = s.loc[dt - pd.Timedelta(days=7): dt - pd.Timedelta(days=1)]
+    rm7 = float(last7.mean()) if len(last7) > 0 else 0.0
 
-    # sum の存在チェック
-    if "sum" not in df.columns:
-        raise ValueError("df_all に 'sum' 列（総物数 or その予測値）が必要です")
+    # フラグは _compute_flags を唯一の定義にする
+    flags = _compute_flags(pd.DatetimeIndex([dt])).iloc[0]
 
-    # lag/rolling は「過去〜未来を含めた全期間」で計算
-    df["sum_lag_1"] = df["sum"].shift(1)
-    df["sum_lag_7"] = df["sum"].shift(7)
-    df["sum_rm7"] = df["sum"].shift(1).rolling(7).mean()
+    return {
+        "weekday": float(dt.weekday()),
+        "holiday": float(flags["holiday"]),
+        "is_obon": float(flags["is_obon"]),
+        "is_nenmatsu": float(flags["is_nenmatsu"]),
+        "sum_lag_1": float(lag_1),
+        "sum_rm7": float(rm7),
+        "sum_lag_7": float(lag_7),
+    }
 
-    # 未来日のみ抽出
-    mask_future = df.index >= pred_start_date
-    df_future = df.loc[mask_future, FEATURES_REGISTERED_PLUS].copy()
-
-    # 未来区間の中でも、計算に足りない先頭行は NaN になるので落とす
-    df_future_feat = df_future.dropna()
-
-    return df_future_feat

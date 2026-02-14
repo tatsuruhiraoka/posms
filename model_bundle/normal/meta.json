@@ -1,0 +1,6 @@
+{
+  "run_id": "e0f6ef79017f473b98bc582dcd25a25b",
+  "mail_kind": "normal",
+  "experiment": "posms",
+  "tracking_uri": "http://mlflow:5000"
+}

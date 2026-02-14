@@ -217,6 +217,62 @@ def q1(con: sqlite3.Connection, sql: str, params=()):
     return row[0] if row else None
 
 
+def read_csv_flexible(path: Path) -> pd.DataFrame:
+    """
+    CSVを柔軟に読み込む:
+      - UTF-8 (BOMあり/なし) : utf-8-sig
+      - Windows Excel由来の Shift JIS (CP932) : cp932 フォールバック
+    """
+    try:
+        return pd.read_csv(path, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="cp932")
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def to_int(v, default: int = 0) -> int:
+    """
+    Excel/CSV由来の値を安全に int 化する。
+    - None, NaN, '' は default
+    - '10.0' のような文字列もOK
+    """
+    if v is None:
+        return default
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return default
+    except Exception:
+        pass
+    s = str(v).strip()
+    if s == "":
+        return default
+    try:
+        return int(float(s))
+    except Exception:
+        return default
+
+
+def norm_date(v) -> str | None:
+    """
+    日付を YYYY-MM-DD に正規化する（SQLite内の文字列として統一）。
+    """
+    if v is None:
+        return None
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return None
+    except Exception:
+        pass
+    dt = pd.to_datetime(v, errors="coerce")
+    if pd.isna(dt):
+        return None
+    return dt.strftime("%Y-%m-%d")
+
+
 def ensure_office(con: sqlite3.Connection, office_code: str, office_name: str) -> int:
     oid = q1(con, "SELECT office_id FROM office WHERE office_code=?", (office_code,))
     if oid:
@@ -243,6 +299,7 @@ def ensure_department(con: sqlite3.Connection, office_id: int, dc: str) -> int:
 
 
 def ensure_team(con: sqlite3.Connection, department_id: int, tn: str) -> int:
+    tn = str(tn).strip()
     tid = q1(
         con,
         "SELECT team_id FROM team WHERE department_id=? AND team_name=?",
@@ -298,14 +355,14 @@ def upsert_demand(con: sqlite3.Connection, zone_id: int, r: dict):
         """,
         (
             int(zone_id),
-            int(r.get("demand_mon", 0) or 0),
-            int(r.get("demand_tue", 0) or 0),
-            int(r.get("demand_wed", 0) or 0),
-            int(r.get("demand_thu", 0) or 0),
-            int(r.get("demand_fri", 0) or 0),
-            int(r.get("demand_sat", 0) or 0),
-            int(r.get("demand_sun", 0) or 0),
-            int(r.get("demand_holiday", 0) or 0),
+            to_int(r.get("demand_mon"), 0),
+            to_int(r.get("demand_tue"), 0),
+            to_int(r.get("demand_wed"), 0),
+            to_int(r.get("demand_thu"), 0),
+            to_int(r.get("demand_fri"), 0),
+            to_int(r.get("demand_sat"), 0),
+            to_int(r.get("demand_sun"), 0),
+            to_int(r.get("demand_holiday"), 0),
         ),
     )
 
@@ -357,8 +414,8 @@ def upsert_employee(con: sqlite3.Connection, r: dict, team_id: int, display_orde
             str(r.get("name") or ""),
             str(r.get("employment_type") or ""),
             (str(r.get("position")).strip() if pd.notna(r.get("position")) else None),
-            int(r.get("default_work_hours") or 0),
-            int(r.get("monthly_work_hours") or 0),
+            to_int(r.get("default_work_hours"), 0),
+            to_int(r.get("monthly_work_hours"), 0),
             int(team_id),
             i01(r.get("is_leader"), 0),
             i01(r.get("is_vice_leader"), 0),
@@ -396,8 +453,7 @@ def main() -> None:
     # jobtypes.csv（CSV行順を display_order に入れる）
     jobtypes = csvdir / "jobtypes.csv"
     if jobtypes.exists():
-        df = pd.read_csv(jobtypes, encoding="utf-8")
-        df.columns = [c.strip() for c in df.columns]
+        df = normalize_columns(read_csv_flexible(jobtypes))
         for i, (_, r) in enumerate(df.iterrows(), start=1):
             con.execute(
                 """
@@ -418,18 +474,15 @@ def main() -> None:
                     str(r.get("job_name") or "").strip(),
                     str(r.get("start_time") or "").strip(),
                     str(r.get("end_time") or "").strip(),
-                    int(r.get("work_hours") or 0),
+                    to_int(r.get("work_hours"), 0),
                     int(i),
                 ),
             )
 
-    # zones.csv / demand_profiles.csv / employees.csv で dept/team を作りつつ投入
-
     # zones.csv（CSV行順を zone.display_order に入れる）
     zones = csvdir / "zones.csv"
     if zones.exists():
-        df = pd.read_csv(zones, encoding="utf-8")
-        df.columns = [c.strip() for c in df.columns]
+        df = normalize_columns(read_csv_flexible(zones))
         for i, (_, r) in enumerate(df.iterrows(), start=1):
             dc = str(r.get("department_code") or "").strip()
             tn = str(r.get("team_name") or "").strip()
@@ -445,8 +498,7 @@ def main() -> None:
     # demand_profiles.csv（順序は不要）
     dp = csvdir / "demand_profiles.csv"
     if dp.exists():
-        df = pd.read_csv(dp, encoding="utf-8")
-        df.columns = [c.strip() for c in df.columns]
+        df = normalize_columns(read_csv_flexible(dp))
         for _, r in df.iterrows():
             dc = str(r.get("department_code") or "").strip()
             tn = str(r.get("team_name") or "").strip()
@@ -463,8 +515,7 @@ def main() -> None:
     # employees.csv（CSV行順を employee.display_order に入れる）
     employees = csvdir / "employees.csv"
     if employees.exists():
-        df = pd.read_csv(employees, encoding="utf-8")
-        df.columns = [c.strip() for c in df.columns]  # ★is_leader の末尾スペース対策
+        df = normalize_columns(read_csv_flexible(employees))
         for i, (_, r) in enumerate(df.iterrows(), start=1):
             dc = str(r.get("department_code") or "").strip()
             tn = str(r.get("team_name") or "").strip()
@@ -477,14 +528,13 @@ def main() -> None:
     # employee_zone_proficiencies.csv（5列版）
     ezp = csvdir / "employee_zone_proficiencies.csv"
     if ezp.exists():
-        df = pd.read_csv(ezp, encoding="utf-8")
-        df.columns = [c.strip() for c in df.columns]
+        df = normalize_columns(read_csv_flexible(ezp))
         for _, r in df.iterrows():
             ec = str(r.get("employee_code") or "").strip()
             dc = str(r.get("department_code") or "").strip()
             tn = str(r.get("team_name") or "").strip()
             zn = str(r.get("zone_name") or "").strip()
-            prof = int(r.get("proficiency") or 0)
+            prof = to_int(r.get("proficiency"), 0)
             if not (ec and dc and tn and zn):
                 continue
             eid = q1(con, "SELECT employee_id FROM employee WHERE employee_code=?", (ec,))
@@ -501,14 +551,13 @@ def main() -> None:
                   proficiency=excluded.proficiency,
                   updated_at=CURRENT_TIMESTAMP
                 """,
-                (int(eid), int(zid), prof),
+                (int(eid), int(zid), int(prof)),
             )
 
     # employee_availabilities.csv（曜日 + シフト種別）
     eav = csvdir / "employee_availabilities.csv"
     if eav.exists():
-        df = pd.read_csv(eav, encoding="utf-8")
-        df.columns = [c.strip() for c in df.columns]
+        df = normalize_columns(read_csv_flexible(eav))
         for _, r in df.iterrows():
             ec = str(r.get("employee_code") or "").strip()
             if not ec:
@@ -546,14 +595,14 @@ def main() -> None:
                 """,
                 (
                     int(eid),
-                    int(r.get("available_mon") if pd.notna(r.get("available_mon")) else 1),
-                    int(r.get("available_tue") if pd.notna(r.get("available_tue")) else 1),
-                    int(r.get("available_wed") if pd.notna(r.get("available_wed")) else 1),
-                    int(r.get("available_thu") if pd.notna(r.get("available_thu")) else 1),
-                    int(r.get("available_fri") if pd.notna(r.get("available_fri")) else 1),
-                    int(r.get("available_sat") if pd.notna(r.get("available_sat")) else 0),
-                    int(r.get("available_sun") if pd.notna(r.get("available_sun")) else 0),
-                    int(r.get("available_hol") if pd.notna(r.get("available_hol")) else 0),
+                    to_int(r.get("available_mon"), 1),
+                    to_int(r.get("available_tue"), 1),
+                    to_int(r.get("available_wed"), 1),
+                    to_int(r.get("available_thu"), 1),
+                    to_int(r.get("available_fri"), 1),
+                    to_int(r.get("available_sat"), 0),
+                    to_int(r.get("available_sun"), 0),
+                    to_int(r.get("available_hol"), 0),
                     str(r.get("available_early") or "").strip(),
                     str(r.get("available_day") or "").strip(),
                     str(r.get("available_mid") or "").strip(),
@@ -564,13 +613,12 @@ def main() -> None:
                 ),
             )
 
-    # holiday
+    # holiday（holiday_dateを正規化）
     hpath = csvdir / args.holiday_csv
     if hpath.exists():
-        df = pd.read_csv(hpath, encoding="utf-8")
-        df.columns = [c.strip() for c in df.columns]
+        df = normalize_columns(read_csv_flexible(hpath))
         for _, r in df.iterrows():
-            d = str(r.get("holiday_date") or "").strip()
+            d = norm_date(r.get("holiday_date"))
             name = str(r.get("name") or "").strip()
             if not (d and name):
                 continue
@@ -583,38 +631,34 @@ def main() -> None:
                 (d, name),
             )
 
-    # postal_datas.csv → mailvolume_by_type（日本語ヘッダ対応）
+    # postal_datas.csv → mailvolume_by_type
     postal = csvdir / "postal_datas.csv"
     if postal.exists():
-        df = pd.read_csv(postal, encoding="utf-8")
-        df.columns = [c.strip() for c in df.columns]
-        rename_map = {
-            "日付": "date",
-            "通常郵便": "normal",
-            "書留": "kakitome",
-            "ゆうパケット": "yu_packet",
-            "レターパックライト": "letterpack_light",
-            "レターパックプラス": "letterpack_plus",
-            "特定記録": "tokutei_kiroku",
-            "ゆうパック": "yu_pack",
-            "eパケット": "e_packet",
-            "EMS": "ems",
-            "年賀組立": "nenga_assembly",
-            "年賀配達": "nenga_delivery",
-        }
-        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-        kinds = [k for k in rename_map.values() if k != "date"]
+        df = normalize_columns(read_csv_flexible(postal))
+
+        required = ["date", "normal", "registered", "lp_plus", "nenga_assembly", "nenga_delivery"]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            raise ValueError(f"postal_datas.csv に必要列がありません: {missing}")
+
+        kinds = ["normal", "registered", "lp_plus", "nenga_assembly", "nenga_delivery"]
 
         for _, r in df.iterrows():
-            d = str(r.get("date") or "").strip()
+            d = norm_date(r.get("date"))
             if not d:
                 continue
+
             for kind in kinds:
-                if kind not in df.columns:
-                    continue
                 v = r.get(kind)
-                if pd.isna(v):
+
+                # None/NaN/空文字はスキップ（“値がある列だけ入れる”）
+                if v is None:
                     continue
+                if isinstance(v, float) and pd.isna(v):
+                    continue
+                if isinstance(v, str) and v.strip() == "":
+                    continue
+
                 con.execute(
                     """
                     INSERT INTO mailvolume_by_type
@@ -624,9 +668,8 @@ def main() -> None:
                       actual_volume=excluded.actual_volume,
                       updated_at=CURRENT_TIMESTAMP
                     """,
-                    (d, office_id, kind, int(v)),
+                    (d, office_id, kind, to_int(v, 0)),
                 )
-
     con.commit()
     con.close()
     print(f"OK: created sqlite demo db -> {out}")

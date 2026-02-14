@@ -70,7 +70,7 @@ services:
         condition: service_started
       db:
         condition: service_healthy
-    volumes: [.:/app]     # 開発中はソースをマウント
+    volumes: [.:/app]
     working_dir: /app
     command: ["sh","-lc","until curl -fsS http://prefect:4200/ >/dev/null; do sleep 2; done; prefect work-pool create posms-pool --type process || true; exec prefect worker start --pool posms-pool --type process"]
 
@@ -98,21 +98,22 @@ services:
         condition: service_started
     volumes: [.:/app]
     working_dir: /app
-    # command: ["posms","--help"]   # 必要に応じて上書き
-  
-#  api:
-#    build:
-#      context: .
-#      dockerfile: Dockerfile
-#    environment:
-#      DATABASE_URL: postgresql+psycopg2://posms@db:5432/posms
-#    depends_on:
-#      db:
-#        condition: service_healthy
-#    entrypoint: []                   # ← ここで Dockerfile の ENTRYPOINT(posms) を無効化
-#    command: ["uvicorn","posms.api.main:app","--host","0.0.0.0","--port","8000"]
-#    ports:
-#      - "127.0.0.1:8000:8000"
+    # command: ["posms","--help"]
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: posms-metabase
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./metabase-data:/metabase-data
+    environment:
+      - MB_DB_TYPE=h2
+      - MB_DB_FILE=/metabase-data/metabase.db
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   db_data:
