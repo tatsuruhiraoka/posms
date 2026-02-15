@@ -114,3 +114,9 @@ ehthumbs.db
 .venv/
 # Office temporary files
 ~$*
+# build artifacts
+build/
+dist/
+*.exe
+excel_templates/*.exe
+
