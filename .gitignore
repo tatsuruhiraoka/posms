@@ -81,7 +81,9 @@ excel_templates/*班データ*.xls*
 # 分担表 / 勤務指定表（生成物）
 excel_templates/分担表*.xls*
 excel_templates/勤務指定表*.xls*
-excel_templates/export_csv/inputs_echo.json
+
+# Generated export_csv (DO NOT COMMIT)
+excel_templates/export_csv/
 
 # =========================
 # SQLite artifacts
@@ -102,15 +104,32 @@ excel_templates/*.db-shm
 .pytype/
 
 # App logs
-app_last.log
-posms.log
 *.log
 
 # OS ごみ
 Thumbs.db
 ehthumbs.db
 ._*
-# Local venv (safety)
-.venv/
 # Office temporary files
 ~$*
+
+# =========================
+# Build / Distribution artifacts (DO NOT COMMIT)
+# =========================
+dist/
+build/
+*.spec
+
+# PyInstaller internal bundles
+**/_internal/
+
+# Windows distribution binaries
+excel_templates/*.exe
+bin/**/*.exe
+bin/**/*.dll
+
+# Extra venv used for conversion
+.venv_convert/
+# Local Metabase data (DO NOT COMMIT)
+metabase-data/
+

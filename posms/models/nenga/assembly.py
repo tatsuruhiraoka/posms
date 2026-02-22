@@ -1,17 +1,17 @@
 # posms/models/nenga/assembly.py
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
+import joblib
 import numpy as np
 import pandas as pd
-import mlflow
-from sklearn.linear_model import LinearRegression
 
 from posms.models.nenga.features import NengaFeatureBuilder
 
-MAIL_KIND = "nenga_assembly"
-TARGET_COL = "actual_volume"
-
-FEATURES = [
+FEATURES_NENGA_ASSEMBLY = [
     "year",
     "nenga_prep_offset",
     "lag_365",
@@ -20,80 +20,58 @@ FEATURES = [
 ]
 
 
-def _round_to_thousands(x: float) -> int:
-    """千単位で四捨五入（必要なら切り捨て/切り上げに変更）"""
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        return 0
-    return int(round(float(x) / 1000.0) * 1000)
+def _bundle_root() -> Path:
+    p = os.getenv("POSMS_BUNDLE_DIR")
+    if p:
+        return Path(p).expanduser().resolve()
+
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).parent
+        for c in (exe_dir / "_internal" / "model_bundle", exe_dir / "model_bundle"):
+            if c.exists():
+                return c
+        return exe_dir / "_internal" / "model_bundle"
+
+    return (Path.cwd() / "model_bundle").resolve()
 
 
-def train(engine, *, office_id: int, experiment: str = "posms_nenga_assembly") -> str:
-    """
-    年賀組立（線形）を学習して MLflow に保存。run_id を返す。
-    """
-    fb = NengaFeatureBuilder(engine, office_id=office_id, mail_kind=MAIL_KIND)
-    df = fb.build().copy()
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").reset_index(drop=True)
-
-    df_train = df[df[TARGET_COL].notna()].copy()
-    df_train = df_train[df_train[TARGET_COL] > 0]  # ←追加（休み=0を学習から除外）
-    df_train = df_train.dropna(subset=FEATURES + [TARGET_COL])
-
-    model = LinearRegression()
-    if len(df_train) > 0:
-        X = df_train[FEATURES].astype(float)
-        y = df_train[TARGET_COL].astype(float)
-        model.fit(X, y)
-
-    mlflow.set_experiment(experiment)
-    with mlflow.start_run() as run:
-        mlflow.log_param("mail_kind", MAIL_KIND)
-        mlflow.log_param("office_id", int(office_id))
-        mlflow.log_param("model", "LinearRegression")
-        mlflow.log_param("features", ",".join(FEATURES))
-        mlflow.log_param("train_rows", int(len(df_train)))
-
-        mlflow.sklearn.log_model(model, artifact_path="model")
-
-        return run.info.run_id
+def _load_model() -> object:
+    p = _bundle_root() / "nenga_assembly" / "model.joblib"
+    if not p.exists():
+        raise RuntimeError(f"nenga_assembly model not found: {p}")
+    return joblib.load(p)
 
 
 def predict(
-    engine, *, office_id: int, run_id: str, round_to_1000: bool = True
-) -> pd.Series:
+    engine,
+    *,
+    office_id: int,
+    round_to_1000: bool = True,
+) -> np.ndarray:
     """
-    学習済み 年賀組立（線形）モデルで raw 予測を返す。
-    - 稼働日（組立する/しない）や繰り越しは “シフト作成者の入力” に基づいて PuLP直前で適用する想定
-    - ここでは日別の raw 需要を返すだけ
-
-    返り値は df（特徴量）の行インデックスに対応する Series。
+    年賀組立 (nenga_assembly) を model_bundle から予測して返す（DB更新なし）。
+    欠損行（lag等がNaN）は予測せず 0 とする（影響範囲を最小化）。
     """
-    fb = NengaFeatureBuilder(engine, office_id=office_id, mail_kind=MAIL_KIND)
-    df = fb.build().copy()
-
-    if "date" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.copy()
-            df["date"] = df.index
-        else:
-            raise ValueError("NengaFeatureBuilder.build() の戻りに 'date' 列が必要です")
-
-    df["date"] = pd.to_datetime(df["date"])
+    df = NengaFeatureBuilder(engine, office_id=office_id, mail_kind="nenga_assembly").build()
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
     df = df.sort_values("date").reset_index(drop=True)
 
-    model = mlflow.sklearn.load_model(f"runs:/{run_id}/model")
+    missing = [c for c in FEATURES_NENGA_ASSEMBLY if c not in df.columns]
+    if missing:
+        raise RuntimeError(f"nenga_assembly: missing feature columns: {missing}")
 
-    preds = pd.Series(0.0, index=df.index, dtype=float)
+    X = df[FEATURES_NENGA_ASSEMBLY].astype(float)
+    mask_ok = X.notna().all(axis=1)
 
-    mask = df[FEATURES].notna().all(axis=1)
-    if mask.any():
-        preds.loc[mask] = model.predict(df.loc[mask, FEATURES].astype(float))
+    model = _load_model()
 
-    preds = preds.clip(lower=0.0)
+    y = np.zeros(len(df), dtype=float)
+    if mask_ok.any():
+        y[mask_ok.values] = np.asarray(model.predict(X.loc[mask_ok]), dtype=float)
 
-    # 丸めは「表示単位」の問題なので、モデル側では任意にする
+    y = np.clip(y, 0.0, None)
+
     if round_to_1000:
-        preds = preds.apply(_round_to_thousands).astype(float)
+        y = np.round(y / 1000.0) * 1000.0
 
-    return preds
+    return y.astype(int)

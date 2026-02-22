@@ -1,45 +1,72 @@
-# posms/model/registered_plus/__init__.py
+# posms/models/registered_plus/__init__.py
 """
 registered_plus model
 =====================
 
 書留 + レターパックプラス をまとめた予測モデル。
 
-- 学習:
-    train_from_hist(df_hist, ...)
-
-運用での予測（forecast）は CLI 側で
-ModelPredictor(model_name="posms_registered_plus", ...) を使って実行する。
+配布(exe)では MLflow 依存を避けるため、ここでは推論で必要な features のみを即時 import する。
+学習系（trainer/tuner/metrics/pipeline）は遅延 import で提供する。
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+# ------------------------------------------------------------
+# 推論で必要なものだけ（安全：MLflow非依存）
+# ------------------------------------------------------------
 from posms.models.registered_plus.features import (
     TARGET,
     FEATURES_REGISTERED_PLUS,
     build_registered_plus_features,
-    build_registered_plus_feature_row,      # CLI自己回帰ローリング用
+    build_registered_plus_feature_row,  # CLI自己回帰ローリング用
 )
 
-from posms.models.registered_plus.trainer import train
-from posms.models.registered_plus.tuner import get_best_params
-from posms.models.registered_plus.metrics import calc_metrics
+# 型ヒント用（実行時importしない）
+if TYPE_CHECKING:
+    from posms.models.registered_plus.pipeline import TrainResult  # noqa: F401
 
-from posms.models.registered_plus.pipeline import (
-    TrainResult,
-    train_from_hist,
-)
+
+# ------------------------------------------------------------
+# 学習系は遅延 import（配布で mlflow を要求しない）
+# ------------------------------------------------------------
+def train(*args: Any, **kwargs: Any):
+    from posms.models.registered_plus.trainer import train as _train
+    return _train(*args, **kwargs)
+
+
+def get_best_params(*args: Any, **kwargs: Any):
+    from posms.models.registered_plus.tuner import get_best_params as _get_best_params
+    return _get_best_params(*args, **kwargs)
+
+
+def calc_metrics(*args: Any, **kwargs: Any):
+    from posms.models.registered_plus.metrics import calc_metrics as _calc_metrics
+    return _calc_metrics(*args, **kwargs)
+
+
+def train_from_hist(*args: Any, **kwargs: Any):
+    from posms.models.registered_plus.pipeline import train_from_hist as _train_from_hist
+    return _train_from_hist(*args, **kwargs)
+
+
+# TrainResult は型として参照されることが多いので、必要なら遅延で取得
+def TrainResult():  # type: ignore[misc]
+    from posms.models.registered_plus.pipeline import TrainResult as _TrainResult
+    return _TrainResult
+
 
 __all__ = [
-    # constants / features
+    # constants / features（推論で必要）
     "TARGET",
     "FEATURES_REGISTERED_PLUS",
     "build_registered_plus_features",
-    "build_registered_plus_future_features",
     "build_registered_plus_feature_row",
-    # core ML functions
+    # 学習系（遅延）
     "train",
     "get_best_params",
     "calc_metrics",
-    # pipeline
     "TrainResult",
     "train_from_hist",
 ]

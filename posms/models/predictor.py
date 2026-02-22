@@ -2,30 +2,67 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+import os
+import sys
 from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-import mlflow
-import mlflow.pyfunc
-import mlflow.xgboost
-import mlflow.sklearn
+import jpholiday
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-import jpholiday
-
-from .._mlflow import set_tracking_uri_zero_config
 
 LOGGER = logging.getLogger(__name__)
 
 
+# =========================================================
+# model_bundle helpers
+# =========================================================
+def _bundle_root() -> Path:
+    """
+    model_bundle のルートを返す。
+
+    優先順位:
+      1) POSMS_BUNDLE_DIR
+      2) frozen(exe) の場合: <exe_dir>/_internal/model_bundle または <exe_dir>/model_bundle
+      3) 開発時: <cwd>/model_bundle
+    """
+    p = os.getenv("POSMS_BUNDLE_DIR")
+    if p:
+        return Path(p).expanduser().resolve()
+
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).parent
+        for c in (exe_dir / "_internal" / "model_bundle", exe_dir / "model_bundle"):
+            if c.exists():
+                return c
+        # 期待パス（無ければエラーに使う）
+        return exe_dir / "_internal" / "model_bundle"
+
+    return (Path.cwd() / "model_bundle").resolve()
+
+
+def _should_use_bundle() -> bool:
+    """
+    bundle 利用判定。
+
+    - 配布 exe（frozen）なら自動で bundle 優先
+    - 開発時は POSMS_USE_BUNDLE=1/true/yes で bundle 強制
+    """
+    if getattr(sys, "frozen", False):
+        return True
+    v = os.getenv("POSMS_USE_BUNDLE", "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
 class ModelPredictor:
     """
-    Unified MLflow ModelPredictor.
+    Unified ModelPredictor.
 
-    - runs:/<run_id>/model が最優先（確実）
-    - それ以外は Experiment の最新 run を tags で絞って取得（事故防止）
-    - pyfunc → xgboost → sklearn の順でロードを試みる
+    - 配布(exe/frozen)では model_bundle/<mail_kind>/model.xgb を優先してロード（MLflow不要）
+    - 開発では MLflow を従来通り利用（run_id 優先 → 最新 run）
+    - 予測は pyfunc → xgboost → sklearn の順に対応（MLflowロード時のみ）
     """
 
     def __init__(
@@ -39,19 +76,35 @@ class ModelPredictor:
         office_id: Optional[int] = None,
         stage: Optional[str] = None,  # 将来廃止方向なので基本は None 推奨
     ) -> None:
-        set_tracking_uri_zero_config(tracking_uri)
-
-        self._client = mlflow.tracking.MlflowClient()
         self._experiment_name = experiment
 
-        self._pyfunc_model: Optional[mlflow.pyfunc.PyFuncModel] = None
+        self._pyfunc_model: Optional[Any] = None
         self._xgb_booster: Optional[xgb.Booster] = None
         self._sk_model: Optional[Any] = None
 
         self._mail_kind = (mail_kind or "").lower() or None
         self._office_id = office_id
         self._model_name = (model_name or "").strip() or None
-        self.model_uri: str
+
+        self.model_uri: str = ""
+
+        # ------------------------------------------------------------
+        # 1) 配布（bundle）を最優先で試す
+        # ------------------------------------------------------------
+        if self._try_load_from_bundle():
+            LOGGER.info("Model loaded from model_bundle: %s", self.model_uri)
+            return
+
+        # ------------------------------------------------------------
+        # 2) 開発（MLflow）: 従来通り
+        #    ※ bundle を使わない場合のみ mlflow を import する
+        # ------------------------------------------------------------
+        from .._mlflow import set_tracking_uri_zero_config
+        set_tracking_uri_zero_config(tracking_uri)
+
+        import mlflow  # noqa: WPS433 (delayed import)
+
+        self._client = mlflow.tracking.MlflowClient()
 
         # -------------------------------
         # モデル URI を決定
@@ -60,7 +113,6 @@ class ModelPredictor:
         if run_id:
             uris = [f"runs:/{run_id}/model"]
         else:
-            # stage は廃止方向なので基本は使わない（必要なら指定可）
             if stage:
                 uris.append(f"models:/{model_name}/{stage}")
             uris.append(self._latest_run_uri(experiment))
@@ -101,12 +153,12 @@ class ModelPredictor:
         if len(num_cols) > 0:
             X_df[num_cols] = X_df[num_cols].astype(np.float32)
 
-        # 1) pyfunc
+        # 1) pyfunc（MLflowロード時のみ）
         if self._pyfunc_model is not None:
             pred = self._pyfunc_model.predict(X_df)
             return np.asarray(pred).reshape(-1)
 
-        # 2) xgboost Booster
+        # 2) xgboost Booster（bundle/MLflowどちらでも）
         if self._xgb_booster is not None:
             dmat = xgb.DMatrix(X_df, missing=np.nan)
             try:
@@ -119,7 +171,7 @@ class ModelPredictor:
                     return self._xgb_booster.predict(dmat, ntree_limit=int(ntree_limit))
             return self._xgb_booster.predict(dmat)
 
-        # 3) sklearn
+        # 3) sklearn（MLflowロード時のみ）
         if self._sk_model is not None:
             pred = self._sk_model.predict(X_df)
             return np.asarray(pred).reshape(-1)
@@ -130,10 +182,48 @@ class ModelPredictor:
         return float(self.predict(pd.DataFrame([X]))[0])
 
     # ------------------------------------------------------------------
-    # Internals
+    # Internals (bundle)
+    # ------------------------------------------------------------------
+    def _try_load_from_bundle(self) -> bool:
+        if not _should_use_bundle():
+            return False
+
+        if not self._mail_kind:
+            raise RuntimeError("bundle mode requires mail_kind (directory name).")
+
+        root = _bundle_root()
+        d = root / self._mail_kind
+
+        # XGBoost 3.x 互換: UBJ/JSON 優先（旧binは最後の保険）
+        candidates = [
+            d / "model.ubj",
+            d / "model.json",
+            d / "model.xgb",
+        ]
+        model_path = next((p for p in candidates if p.exists()), None)
+        if model_path is None:
+            raise RuntimeError(f"model file not found in bundle dir: {d} (root={root})")
+
+        booster = xgb.Booster()
+        booster.load_model(str(model_path))
+
+        self._pyfunc_model = None
+        self._sk_model = None
+        self._xgb_booster = booster
+        self.model_uri = f"bundle:{d}"
+        return True
+
+    # ------------------------------------------------------------------
+    # Internals (MLflow)
     # ------------------------------------------------------------------
     def _load_model_from_uri(self, uri: str) -> None:
         """指定された URI から pyfunc → xgboost → sklearn の順でロード。"""
+        # 遅延import（bundle利用時は mlflow 不要）
+        import mlflow  # noqa: WPS433 (delayed import)
+        import mlflow.pyfunc  # noqa: WPS433
+        import mlflow.sklearn  # noqa: WPS433
+        import mlflow.xgboost  # noqa: WPS433
+
         self._pyfunc_model = None
         self._xgb_booster = None
         self._sk_model = None
@@ -145,7 +235,7 @@ class ModelPredictor:
             self._pyfunc_model = mlflow.pyfunc.load_model(uri)
             LOGGER.info("Loaded model as pyfunc.")
             return
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             last_err = e
             self._pyfunc_model = None
 
@@ -154,7 +244,7 @@ class ModelPredictor:
             self._xgb_booster = mlflow.xgboost.load_model(uri)
             LOGGER.info("Loaded model as xgboost Booster.")
             return
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             last_err = e
             self._xgb_booster = None
 
@@ -163,7 +253,7 @@ class ModelPredictor:
             self._sk_model = mlflow.sklearn.load_model(uri)
             LOGGER.info("Loaded model as sklearn estimator.")
             return
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             last_err = e
             self._sk_model = None
 
@@ -171,6 +261,13 @@ class ModelPredictor:
 
     def _latest_run_uri(self, experiment_name: str) -> str:
         """Experiment の最新 run から runs:/.../model を返す（tags で絞る）。"""
+        # 遅延import（bundle利用時は mlflow 不要）
+        import mlflow  # noqa: WPS433 (delayed import)
+
+        # __init__ で client を作っている前提だが、保険で無ければ作る
+        if not hasattr(self, "_client") or self._client is None:
+            self._client = mlflow.tracking.MlflowClient()
+
         exp = self._client.get_experiment_by_name(experiment_name)
         if not exp:
             raise RuntimeError(f"Experiment not found: {experiment_name}")

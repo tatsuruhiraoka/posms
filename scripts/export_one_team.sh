@@ -40,9 +40,15 @@ done
 
 # --- Python 実行ファイルをポータブルに探す -------------------------------
 find_python() {
+  # Windows venv (Git Bash / MSYS)
+  if [[ -x "./.venv/Scripts/python.exe" ]]; then echo "./.venv/Scripts/python.exe"; return; fi
+  if [[ -x "./.venv/Scripts/python" ]]; then echo "./.venv/Scripts/python"; return; fi
+
+  # Linux/Mac venv
   if [[ -x "./.venv/bin/python" ]]; then echo "./.venv/bin/python"; return; fi
+
   if command -v python3 >/dev/null 2>&1; then echo "python3"; return; fi
-  if command -v python >/dev/null 2>&1; then echo "python"; return; fi
+  if command -v python  >/dev/null 2>&1; then echo "python";  return; fi
   echo "python"
 }
 PY="$(find_python)"

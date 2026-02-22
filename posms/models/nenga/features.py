@@ -123,7 +123,7 @@ class NengaFeatureBuilder:
               actual_volume,
               forecast_volume,
               price_increase_flag
-            FROM public.mailvolume_by_type
+            FROM mailvolume_by_type
             WHERE office_id = :office_id
               AND mail_kind = :mail_kind
             ORDER BY date
